@@ -1,0 +1,31 @@
+# Built binary
+/mull
+
+# Test / coverage output
+*.out
+coverage.txt
+coverage.html
+
+# Local config (may contain provider API keys); commit mull.example.yaml instead
+mull.yaml
+
+# SQLite database and its sidecar files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
+
+# specs
+specs/
