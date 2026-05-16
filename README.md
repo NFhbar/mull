@@ -1,5 +1,7 @@
 # mull
 
+[![CI](https://github.com/NFhbar/mull/actions/workflows/ci.yml/badge.svg)](https://github.com/NFhbar/mull/actions/workflows/ci.yml)
+
 A lightweight EVM log indexer. Polls an Ethereum-compatible JSON-RPC endpoint
 for contract event logs and persists them to SQLite, resuming from a
 checkpoint on restart.
