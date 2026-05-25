@@ -26,15 +26,17 @@ type Client interface {
 }
 
 type HTTPClient struct {
-	url  string
-	http *http.Client
+	url   string
+	http  *http.Client
+	retry RetryPolicy
 }
 
-func NewHTTPClient(url string, hc *http.Client) *HTTPClient {
+func NewHTTPClient(url string, hc *http.Client, policy RetryPolicy) *HTTPClient {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return &HTTPClient{url: url, http: hc}
+	applyRetryDefaults(&policy)
+	return &HTTPClient{url: url, http: hc, retry: policy}
 }
 
 type rpcRequest struct {
@@ -59,6 +61,12 @@ func (e *rpcError) Error() string {
 }
 
 func (c *HTTPClient) call(ctx context.Context, method string, params []any, out any) error {
+	return retry(ctx, c.retry, func(ctx context.Context) error {
+		return c.callOnce(ctx, method, params, out)
+	})
+}
+
+func (c *HTTPClient) callOnce(ctx context.Context, method string, params []any, out any) error {
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
@@ -71,16 +79,26 @@ func (c *HTTPClient) call(ctx context.Context, method string, params []any, out 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("do request: %w", err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &transientError{err: fmt.Errorf("do request: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &transientError{err: fmt.Errorf("read response: %w", err)}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http %d: %s", resp.StatusCode, raw)
+		httpErr := fmt.Errorf("http %d: %s", resp.StatusCode, raw)
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			return &transientError{err: httpErr}
+		}
+		return httpErr
 	}
 
 	var r rpcResponse

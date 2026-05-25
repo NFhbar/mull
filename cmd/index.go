@@ -49,7 +49,11 @@ func runIndex(ctx context.Context) error {
 	}
 	defer st.Close()
 
-	idx := indexer.New(rpc.NewHTTPClient(cfg.RPCURL, nil), st, indexer.Options{
+	idx := indexer.New(rpc.NewHTTPClient(cfg.RPCURL, nil, rpc.RetryPolicy{
+		Base:        cfg.RPCRetryBase,
+		MaxDelay:    cfg.RPCRetryMaxDelay,
+		MaxAttempts: cfg.RPCRetryMaxAttempts,
+	}), st, indexer.Options{
 		Contract:     cfg.Contract,
 		Topics:       cfg.Topics,
 		ChunkSize:    cfg.ChunkSize,

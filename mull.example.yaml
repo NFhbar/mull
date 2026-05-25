@@ -6,3 +6,9 @@ start_block: 19000000
 chunk_size: 500
 poll_interval: 5s
 db_path: "./mull.db"
+
+# RPC retry knobs (optional). Defaults shown below — transient errors
+# (5xx, 429, network blips) are retried with exponential backoff + jitter.
+rpc_retry_base: 500ms
+rpc_retry_max_delay: 30s
+rpc_retry_max_attempts: 5
