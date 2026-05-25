@@ -42,6 +42,15 @@ rpc_retry_max_attempts: 5 # total attempts (including the original call)
 `chunk_size`, `poll_interval`, and the `rpc_retry_*` keys have defaults
 (1000, 5s, 500ms, 30s, 5). The rest are required.
 
+A poll cycle's effective wall-clock is now `poll_interval +
+worst_case_retry_budget`. With the defaults above (`rpc_retry_max_attempts=5`,
+`rpc_retry_max_delay=30s`), an unlucky chain of failures can stall a single
+`eth_getLogs` call for up to ~2 minutes before the loop continues — operators
+who need a tight head-to-tail cadence should size `rpc_retry_max_attempts` and
+`rpc_retry_max_delay` accordingly. Servers returning a `Retry-After` header on
+429 are honored (clamped to `rpc_retry_max_delay`) so the indexer respects
+provider rate limits rather than retrying on a fixed schedule.
+
 Public RPC endpoints rate-limit aggressively; `cloudflare-eth.com`,
 `ethereum-rpc.publicnode.com`, and `rpc.ankr.com/eth` are all reasonable
 free starting points. For sustained indexing use a provider key.

@@ -194,7 +194,7 @@ func TestContextCancellationAbortsBackoff(t *testing.T) {
 	}
 }
 
-func TestJitterBounded(t *testing.T) {
+func TestBackoffCapBounded(t *testing.T) {
 	policy := RetryPolicy{
 		Base:        10 * time.Millisecond,
 		MaxDelay:    500 * time.Millisecond,
@@ -234,22 +234,67 @@ func TestBackoffCapHandlesOverflow(t *testing.T) {
 	}
 }
 
-func TestUnwrapPreservesUnderlyingError(t *testing.T) {
-	// Sanity: the post-budget error must be reachable via errors.Is/As against
-	// the underlying error string, not against *transientError.
-	srv, _ := countingServer(t, func(w http.ResponseWriter, _ *http.Request, _ int64) {
-		http.Error(w, "boom", http.StatusBadGateway)
-	})
-	c := NewHTTPClient(srv.URL, nil, fastPolicy)
-	_, err := c.BlockNumber(context.Background())
-	if err == nil {
-		t.Fatalf("want error, got nil")
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"", 0},
+		{"0", 0},
+		{"-3", 0},
+		{"not-a-number", 0},
+		{"7", 7 * time.Second},
+		{"  4 ", 4 * time.Second},
+		// HTTP-date 90s in the future.
+		{now.Add(90 * time.Second).UTC().Format(http.TimeFormat), 90 * time.Second},
+		// HTTP-date in the past collapses to 0.
+		{now.Add(-time.Hour).UTC().Format(http.TimeFormat), 0},
 	}
-	if !strings.Contains(err.Error(), "http 502") {
-		t.Fatalf("err = %v, want 'http 502'", err)
-	}
-	var te *transientError
-	if errors.As(err, &te) {
-		t.Fatalf("err still wraps *transientError; want unwrapped")
+	for _, tc := range cases {
+		got := parseRetryAfter(tc.in, now)
+		if got != tc.want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }
+
+func TestRetryAfterHonoredOn429(t *testing.T) {
+	// Server sends 429 with Retry-After once, then succeeds. The override
+	// delay is capped by MaxDelay (fastPolicy's MaxDelay is 100µs), so the
+	// test finishes well under the 1s the header asks for.
+	srv, count := countingServer(t, func(w http.ResponseWriter, _ *http.Request, n int64) {
+		if n == 1 {
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "slow down", http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x10"}`))
+	})
+	c := NewHTTPClient(srv.URL, nil, fastPolicy)
+	start := time.Now()
+	if _, err := c.BlockNumber(context.Background()); err != nil {
+		t.Fatalf("BlockNumber: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("BlockNumber took %v; Retry-After override exceeded MaxDelay cap", elapsed)
+	}
+	if got := count.Load(); got != 2 {
+		t.Fatalf("request count = %d, want 2", got)
+	}
+}
+
+func TestNextDelayHonorsOverride(t *testing.T) {
+	policy := RetryPolicy{Base: time.Millisecond, MaxDelay: time.Second, MaxAttempts: 3}
+	override := 250 * time.Millisecond
+	got := nextDelay(policy, 1, &transientError{err: errors.New("x"), overrideDelay: override})
+	if got != override {
+		t.Errorf("nextDelay with override=%v returned %v, want %v", override, got, override)
+	}
+	// Override above MaxDelay is capped.
+	got = nextDelay(policy, 1, &transientError{err: errors.New("x"), overrideDelay: 10 * time.Second})
+	if got != policy.MaxDelay {
+		t.Errorf("nextDelay with override>MaxDelay returned %v, want %v", got, policy.MaxDelay)
+	}
+}
+

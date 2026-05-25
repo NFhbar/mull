@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math/rand/v2"
 	"time"
 )
@@ -23,19 +24,23 @@ func DefaultRetryPolicy() RetryPolicy {
 
 func applyRetryDefaults(p *RetryPolicy) {
 	d := DefaultRetryPolicy()
-	if p.Base == 0 {
+	if p.Base <= 0 {
 		p.Base = d.Base
 	}
-	if p.MaxDelay == 0 {
+	if p.MaxDelay <= 0 {
 		p.MaxDelay = d.MaxDelay
 	}
-	if p.MaxAttempts == 0 {
+	if p.MaxAttempts <= 0 {
 		p.MaxAttempts = d.MaxAttempts
 	}
 }
 
+// transientError marks an error as eligible for retry. overrideDelay, when
+// positive, signals the retry loop to honor a server-provided wait (e.g. an
+// HTTP Retry-After header) for the next attempt in lieu of jittered backoff.
 type transientError struct {
-	err error
+	err           error
+	overrideDelay time.Duration
 }
 
 func (e *transientError) Error() string { return e.err.Error() }
@@ -54,6 +59,9 @@ func backoffCap(policy RetryPolicy, attempt int) time.Duration {
 	if shift < 0 {
 		shift = 0
 	}
+	// Defensive cap for direct-construction callers that bypass config
+	// validation (which already constrains MaxAttempts to a small value);
+	// the shifted-overflow check below handles all realistic policies.
 	if shift > 30 {
 		shift = 30
 	}
@@ -64,8 +72,9 @@ func backoffCap(policy RetryPolicy, attempt int) time.Duration {
 	return shifted
 }
 
+// retry runs fn with bounded exponential-backoff retries on transient errors.
+// Caller must pass a defaulted policy (see NewHTTPClient / applyRetryDefaults).
 func retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context) error) error {
-	applyRetryDefaults(&policy)
 	var lastErr error
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -82,8 +91,8 @@ func retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context)
 		if attempt == policy.MaxAttempts {
 			break
 		}
-		capDelay := backoffCap(policy, attempt)
-		delay := time.Duration(rand.Int64N(int64(capDelay) + 1))
+		delay := nextDelay(policy, attempt, err)
+		slog.Default().DebugContext(ctx, "rpc retry", "attempt", attempt, "delay_ms", delay.Milliseconds())
 		t := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -97,4 +106,20 @@ func retry(ctx context.Context, policy RetryPolicy, fn func(ctx context.Context)
 		return te.err
 	}
 	return lastErr
+}
+
+// nextDelay returns the wait before the next retry attempt. When the error
+// carries a server-provided override (e.g. Retry-After), it is honored up to
+// policy.MaxDelay; otherwise we draw a jittered sample from [0, backoffCap].
+func nextDelay(policy RetryPolicy, attempt int, err error) time.Duration {
+	var te *transientError
+	if errors.As(err, &te) && te.overrideDelay > 0 {
+		delay := te.overrideDelay
+		if delay > policy.MaxDelay {
+			delay = policy.MaxDelay
+		}
+		return delay
+	}
+	capDelay := backoffCap(policy, attempt)
+	return time.Duration(rand.Int64N(int64(capDelay) + 1))
 }
