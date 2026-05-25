@@ -32,9 +32,24 @@ start_block: 19000000
 chunk_size: 500 # blocks per eth_getLogs request
 poll_interval: 5s # delay between head polls once caught up
 db_path: "./mull.db"
+
+# Optional — retry knobs for transient RPC errors (5xx, 429, network blips).
+rpc_retry_base: 500ms # initial backoff before the first retry
+rpc_retry_max_delay: 30s # cap on a single backoff window
+rpc_retry_max_attempts: 5 # total attempts (including the original call)
 ```
 
-`chunk_size` and `poll_interval` have defaults (1000, 5s). The rest are required.
+`chunk_size`, `poll_interval`, and the `rpc_retry_*` keys have defaults
+(1000, 5s, 500ms, 30s, 5). The rest are required.
+
+A poll cycle's effective wall-clock is now `poll_interval +
+worst_case_retry_budget`. With the defaults above (`rpc_retry_max_attempts=5`,
+`rpc_retry_max_delay=30s`), an unlucky chain of failures can stall a single
+`eth_getLogs` call for up to ~2 minutes before the loop continues — operators
+who need a tight head-to-tail cadence should size `rpc_retry_max_attempts` and
+`rpc_retry_max_delay` accordingly. Servers returning a `Retry-After` header on
+429 are honored (clamped to `rpc_retry_max_delay`) so the indexer respects
+provider rate limits rather than retrying on a fixed schedule.
 
 Public RPC endpoints rate-limit aggressively; `cloudflare-eth.com`,
 `ethereum-rpc.publicnode.com`, and `rpc.ankr.com/eth` are all reasonable
@@ -123,43 +138,36 @@ go build ./...
 
 ## Roadmap
 
-1. **Retries with exponential backoff.** _(blocks unattended use)_
-   A single transient RPC error (5xx, rate-limit, network blip) currently
-   terminates the run. A `retry` helper in `internal/rpc` with
-   context-aware exponential backoff and a bounded attempt budget is
-   the highest-leverage addition: small change, eliminates the most
-   common failure mode.
-
-2. **Reorg handling.** _(correctness near head)_
+1. **Reorg handling.** _(correctness near head)_
    The indexer trusts the chain. Track recent block hashes and, when a
    parent hash mismatches at head, rewind the checkpoint and re-index
    the affected range. Historical backfills are unaffected; this only
    matters once the indexer is caught up and ingesting live blocks.
 
-3. **Concurrent chunk fetches.** _(throughput)_
+2. **Concurrent chunk fetches.** _(throughput)_
    At ~35 ms/event sequentially, backfilling years of mainnet history
    takes a long time. A bounded `errgroup` worker pool fetching N
    chunks in parallel with ordered checkpoint commits is the obvious
    perf lever — single biggest speedup available without changing the
    storage layer.
 
-4. **ABI decoding.** _(data usability)_
+3. **ABI decoding.** _(data usability)_
    Logs are stored as raw topics + hex data. Either generic decoding
    driven by an ABI file in config, or codegen producing typed event
    structs per contract. Codegen is more idiomatic Go and gives type
    safety in any downstream consumer.
 
-5. **`mull serve` query API.** _(completes the Ponder analogy)_
+4. **`mull serve` query API.** _(completes the Ponder analogy)_
    A small HTTP/JSON endpoint exposing events with block-range and
    topic filters. Pairs naturally with ABI decoding once that lands.
 
-6. **WebSocket subscriptions.** _(head latency)_
+5. **WebSocket subscriptions.** _(head latency)_
    `eth_subscribe` over WSS would replace head polling and cut latency
    from `poll_interval` down to sub-second. Lower priority — 5s polling
    is acceptable for most use cases, and getting subscription lifecycle
    - reconnect right adds nontrivial complexity.
 
-7. **Multi-contract / multi-chain.** _(scope expansion)_
+6. **Multi-contract / multi-chain.** _(scope expansion)_
    Multiple indexer instances driven by a sources list in config, each
    with its own checkpoint. Requires reworking the config schema, the
    store layout (checkpoint per source), and the CLI to coordinate

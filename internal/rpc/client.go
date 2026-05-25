@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Log struct {
@@ -26,15 +27,17 @@ type Client interface {
 }
 
 type HTTPClient struct {
-	url  string
-	http *http.Client
+	url   string
+	http  *http.Client
+	retry RetryPolicy
 }
 
-func NewHTTPClient(url string, hc *http.Client) *HTTPClient {
+func NewHTTPClient(url string, hc *http.Client, policy RetryPolicy) *HTTPClient {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return &HTTPClient{url: url, http: hc}
+	applyRetryDefaults(&policy)
+	return &HTTPClient{url: url, http: hc, retry: policy}
 }
 
 type rpcRequest struct {
@@ -59,6 +62,12 @@ func (e *rpcError) Error() string {
 }
 
 func (c *HTTPClient) call(ctx context.Context, method string, params []any, out any) error {
+	return retry(ctx, c.retry, func(ctx context.Context) error {
+		return c.callOnce(ctx, method, params, out)
+	})
+}
+
+func (c *HTTPClient) callOnce(ctx context.Context, method string, params []any, out any) error {
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
 		return fmt.Errorf("marshal request: %w", err)
@@ -71,22 +80,42 @@ func (c *HTTPClient) call(ctx context.Context, method string, params []any, out 
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("do request: %w", err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &transientError{err: fmt.Errorf("do request: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &transientError{err: fmt.Errorf("read response: %w", err)}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("http %d: %s", resp.StatusCode, raw)
+		httpErr := fmt.Errorf("http %d: %s", resp.StatusCode, raw)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return &transientError{
+				err:           httpErr,
+				overrideDelay: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+			}
+		}
+		if resp.StatusCode >= 500 {
+			return &transientError{err: httpErr}
+		}
+		return httpErr
 	}
 
 	var r rpcResponse
 	if err := json.Unmarshal(raw, &r); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
+	// JSON-RPC errors are terminal: providers that surface transient
+	// conditions (e.g. Alchemy -32005 "limit exceeded", Infura -32603) as an
+	// rpc.error payload rather than HTTP 429/5xx will not be retried by this
+	// layer. Allow-listing transient JSON-RPC codes is a possible follow-up.
 	if r.Error != nil {
 		return r.Error
 	}
@@ -162,4 +191,27 @@ func hexUint64(n uint64) string {
 
 func parseHexUint64(s string) (uint64, error) {
 	return strconv.ParseUint(strings.TrimPrefix(s, "0x"), 16, 64)
+}
+
+// parseRetryAfter parses an HTTP Retry-After header. RFC 7231 permits either
+// delta-seconds (an integer) or an HTTP-date. Returns 0 when the header is
+// absent, in the past, or unparseable — signalling the caller to fall back to
+// its normal backoff strategy.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := t.Sub(now); d > 0 {
+			return d
+		}
+	}
+	return 0
 }

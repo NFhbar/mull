@@ -45,7 +45,7 @@ func TestBlockNumber(t *testing.T) {
 		}
 		return "0x10", nil
 	})
-	c := NewHTTPClient(srv.URL, nil)
+	c := NewHTTPClient(srv.URL, nil, RetryPolicy{})
 	got, err := c.BlockNumber(context.Background())
 	if err != nil {
 		t.Fatalf("BlockNumber: %v", err)
@@ -73,7 +73,7 @@ func TestGetLogsDecodesHexFields(t *testing.T) {
 			Data:        "0xdata",
 		}}, nil
 	})
-	c := NewHTTPClient(srv.URL, nil)
+	c := NewHTTPClient(srv.URL, nil, RetryPolicy{})
 	logs, err := c.GetLogs(context.Background(), 1, 10, "0xabc", nil)
 	if err != nil {
 		t.Fatalf("GetLogs: %v", err)
@@ -91,7 +91,7 @@ func TestRPCError(t *testing.T) {
 	srv := newTestServer(t, func(string, json.RawMessage) (any, *rpcError) {
 		return nil, &rpcError{Code: -32000, Message: "boom"}
 	})
-	c := NewHTTPClient(srv.URL, nil)
+	c := NewHTTPClient(srv.URL, nil, RetryPolicy{})
 	_, err := c.BlockNumber(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v, want rpc error containing 'boom'", err)

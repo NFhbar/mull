@@ -6,16 +6,21 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/NFhbar/mull/internal/rpc"
 )
 
 type Config struct {
-	RPCURL       string        `yaml:"rpc_url"`
-	Contract     string        `yaml:"contract"`
-	Topics       []string      `yaml:"topics"`
-	StartBlock   uint64        `yaml:"start_block"`
-	ChunkSize    uint64        `yaml:"chunk_size"`
-	PollInterval time.Duration `yaml:"poll_interval"`
-	DBPath       string        `yaml:"db_path"`
+	RPCURL              string        `yaml:"rpc_url"`
+	Contract            string        `yaml:"contract"`
+	Topics              []string      `yaml:"topics"`
+	StartBlock          uint64        `yaml:"start_block"`
+	ChunkSize           uint64        `yaml:"chunk_size"`
+	PollInterval        time.Duration `yaml:"poll_interval"`
+	DBPath              string        `yaml:"db_path"`
+	RPCRetryBase        time.Duration `yaml:"rpc_retry_base"`
+	RPCRetryMaxDelay    time.Duration `yaml:"rpc_retry_max_delay"`
+	RPCRetryMaxAttempts int           `yaml:"rpc_retry_max_attempts"`
 }
 
 func Load(path string) (*Config, error) {
@@ -41,6 +46,16 @@ func (c *Config) applyDefaults() {
 	if c.PollInterval == 0 {
 		c.PollInterval = 5 * time.Second
 	}
+	d := rpc.DefaultRetryPolicy()
+	if c.RPCRetryBase == 0 {
+		c.RPCRetryBase = d.Base
+	}
+	if c.RPCRetryMaxDelay == 0 {
+		c.RPCRetryMaxDelay = d.MaxDelay
+	}
+	if c.RPCRetryMaxAttempts == 0 {
+		c.RPCRetryMaxAttempts = d.MaxAttempts
+	}
 }
 
 func (c *Config) validate() error {
@@ -52,6 +67,18 @@ func (c *Config) validate() error {
 	}
 	if c.DBPath == "" {
 		return fmt.Errorf("db_path is required")
+	}
+	if c.RPCRetryBase < 0 {
+		return fmt.Errorf("rpc_retry_base must be >= 0")
+	}
+	if c.RPCRetryMaxDelay < 0 {
+		return fmt.Errorf("rpc_retry_max_delay must be >= 0")
+	}
+	if c.RPCRetryMaxAttempts < 1 {
+		return fmt.Errorf("rpc_retry_max_attempts must be >= 1")
+	}
+	if c.RPCRetryMaxAttempts > 20 {
+		return fmt.Errorf("rpc_retry_max_attempts must be <= 20")
 	}
 	return nil
 }
