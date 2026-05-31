@@ -12,3 +12,9 @@ db_path: "./mull.db"
 rpc_retry_base: 500ms          # (optional)
 rpc_retry_max_delay: 30s       # (optional)
 rpc_retry_max_attempts: 5      # (optional)
+
+# Bounded worker pool for catch-up. Default 1 (sequential, matches today's
+# behaviour). 4 is a sane shared-RPC default; ceiling is 8. Higher values
+# increase pressure on the RPC — rely on the rpc_retry_* knobs above to
+# absorb 429s on rate-limited endpoints.
+concurrency: 1                 # (optional, 1..8)

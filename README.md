@@ -37,10 +37,22 @@ db_path: "./mull.db"
 rpc_retry_base: 500ms # initial backoff before the first retry
 rpc_retry_max_delay: 30s # cap on a single backoff window
 rpc_retry_max_attempts: 5 # total attempts (including the original call)
+
+# Optional — bounded worker pool for catch-up. Default 1 preserves sequential
+# behaviour; 4 is a sane shared-RPC default; ceiling is 8.
+concurrency: 1
 ```
 
-`chunk_size`, `poll_interval`, and the `rpc_retry_*` keys have defaults
-(1000, 5s, 500ms, 30s, 5). The rest are required.
+`chunk_size`, `poll_interval`, the `rpc_retry_*` keys, and `concurrency`
+have defaults (1000, 5s, 500ms, 30s, 5, 1). The rest are required.
+
+`concurrency` interacts with the `rpc_retry_*` knobs: higher concurrency
+multiplies the number of in-flight `eth_getLogs` calls hitting the RPC at
+once. Public endpoints rate-limit aggressively, so the retry layer (with
+`Retry-After` honoring) absorbs the resulting 429s — but if you raise
+`concurrency` you should also size `rpc_retry_max_attempts` and
+`rpc_retry_max_delay` to match. A sane default for a shared/public RPC is
+`concurrency: 4`; a dedicated provider key tolerates the full ceiling of 8.
 
 A poll cycle's effective wall-clock is now `poll_interval +
 worst_case_retry_budget`. With the defaults above (`rpc_retry_max_attempts=5`,
@@ -67,11 +79,13 @@ Two persistent flags control log output:
 `AddSource` (file:line) is auto-enabled at `debug` level. Logs go to stderr.
 
 Each indexed chunk emits a line carrying `contract`, `from`, `to`, `events`,
-`took_ms`, and `lag_blocks` (head − to), so you can watch progress and
-catch-up rate:
+`fetch_ms` (worker-side `eth_getLogs` time for this chunk), `commit_lag_ms`
+(time the chunk waited in the committer for earlier chunks to land — always
+0 at `concurrency: 1`, can be nonzero with parallel fetches), and
+`lag_blocks` (head − to), so you can watch progress and catch-up rate:
 
 ```
-time=… level=INFO msg="indexed range" contract=0xA0b8… from=19000000 to=19000499 events=4420 took_ms=17361 lag_blocks=2134567
+time=… level=INFO msg="indexed range" contract=0xA0b8… from=19000000 to=19000499 events=4420 fetch_ms=17361 commit_lag_ms=0 lag_blocks=2134567
 ```
 
 The `contract` field is bound once via `slog.Logger.With` rather than
