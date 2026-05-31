@@ -59,6 +59,7 @@ func runIndex(ctx context.Context) error {
 		ChunkSize:    cfg.ChunkSize,
 		PollInterval: cfg.PollInterval,
 		StartBlock:   cfg.StartBlock,
+		Concurrency:  cfg.Concurrency,
 		Logger:       logger,
 	})
 	return idx.Run(ctx)

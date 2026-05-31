@@ -21,6 +21,7 @@ type Config struct {
 	RPCRetryBase        time.Duration `yaml:"rpc_retry_base"`
 	RPCRetryMaxDelay    time.Duration `yaml:"rpc_retry_max_delay"`
 	RPCRetryMaxAttempts int           `yaml:"rpc_retry_max_attempts"`
+	Concurrency         int           `yaml:"concurrency"`
 }
 
 func Load(path string) (*Config, error) {
@@ -56,6 +57,9 @@ func (c *Config) applyDefaults() {
 	if c.RPCRetryMaxAttempts == 0 {
 		c.RPCRetryMaxAttempts = d.MaxAttempts
 	}
+	if c.Concurrency == 0 {
+		c.Concurrency = 1
+	}
 }
 
 func (c *Config) validate() error {
@@ -79,6 +83,12 @@ func (c *Config) validate() error {
 	}
 	if c.RPCRetryMaxAttempts > 20 {
 		return fmt.Errorf("rpc_retry_max_attempts must be <= 20")
+	}
+	if c.Concurrency < 1 {
+		return fmt.Errorf("concurrency must be between 1 and 8")
+	}
+	if c.Concurrency > 8 {
+		return fmt.Errorf("concurrency must be between 1 and 8")
 	}
 	return nil
 }
