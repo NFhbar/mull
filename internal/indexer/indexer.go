@@ -101,10 +101,11 @@ type chunkRange struct {
 }
 
 type chunkResult struct {
-	from    uint64
-	to      uint64
-	events  []store.Event
-	startAt time.Time
+	from      uint64
+	to        uint64
+	events    []store.Event
+	startAt   time.Time
+	fetchedAt time.Time
 }
 
 func (i *Indexer) catchUp(ctx context.Context, from, head uint64) (uint64, error) {
@@ -112,13 +113,12 @@ func (i *Indexer) catchUp(ctx context.Context, from, head uint64) (uint64, error
 		return from, nil
 	}
 	ranges := make([]chunkRange, 0)
-	for f := from; f <= head; {
+	for f := from; f <= head; f += i.chunkSize {
 		t := f + i.chunkSize - 1
 		if t > head {
 			t = head
 		}
 		ranges = append(ranges, chunkRange{from: f, to: t})
-		f = t + 1
 	}
 	return i.runScheduler(ctx, from, head, ranges)
 }
@@ -157,7 +157,7 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 					return fmt.Errorf("get logs [%d,%d]: %w", r.from, r.to, err)
 				}
 				select {
-				case results <- chunkResult{from: r.from, to: r.to, events: toEvents(logs), startAt: start}:
+				case results <- chunkResult{from: r.from, to: r.to, events: toEvents(logs), startAt: start, fetchedAt: time.Now()}:
 				case <-wctx.Done():
 					return wctx.Err()
 				}
@@ -193,7 +193,8 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 					"from", ready.from,
 					"to", ready.to,
 					"events", len(ready.events),
-					"took_ms", time.Since(ready.startAt).Milliseconds(),
+					"fetch_ms", ready.fetchedAt.Sub(ready.startAt).Milliseconds(),
+					"commit_lag_ms", time.Since(ready.fetchedAt).Milliseconds(),
 					"lag_blocks", head-ready.to,
 				)
 				delete(pending, nextExpected)

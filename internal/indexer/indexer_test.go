@@ -31,12 +31,23 @@ type fakeStore struct {
 	events     []store.Event
 	checkpoint uint64
 	ranges     [][2]uint64
+	saveOrder  []uint64      // block_number of events[0] for each SaveEvents call
+	saveCh     chan uint64   // optional: signals on each SaveEvents call (tests that need synchronization)
 }
 
 func (s *fakeStore) SaveEvents(_ context.Context, events []store.Event) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.events = append(s.events, events...)
+	var first uint64
+	if len(events) > 0 {
+		first = events[0].BlockNumber
+		s.saveOrder = append(s.saveOrder, first)
+	}
+	ch := s.saveCh
+	s.mu.Unlock()
+	if ch != nil && len(events) > 0 {
+		ch <- first
+	}
 	return nil
 }
 func (s *fakeStore) Checkpoint(context.Context) (uint64, error) {
@@ -105,7 +116,8 @@ func TestCatchUpConcurrentOrderedCommits(t *testing.T) {
 		20: make(chan struct{}),
 		30: make(chan struct{}),
 	}
-	st := &fakeStore{}
+	saveCh := make(chan uint64, 4)
+	st := &fakeStore{saveCh: saveCh}
 	r := &fakeRPC{
 		head: 39,
 		logsFor: func(from, to uint64) []rpc.Log {
@@ -137,44 +149,44 @@ func TestCatchUpConcurrentOrderedCommits(t *testing.T) {
 		}{n, err}
 	}()
 
-	checkpointEq := func(want uint64, msg string) {
+	expectSave := func(want uint64) {
 		t.Helper()
-		// Allow a beat for the committer to drain after a gate release.
-		deadline := time.Now().Add(500 * time.Millisecond)
-		for time.Now().Before(deadline) {
-			st.mu.Lock()
-			got := st.checkpoint
-			st.mu.Unlock()
-			if got == want {
-				return
+		select {
+		case got := <-saveCh:
+			if got != want {
+				t.Fatalf("save out of order: got chunk from=%d, want %d", got, want)
 			}
-			time.Sleep(5 * time.Millisecond)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timeout waiting for save of chunk from=%d", want)
 		}
-		st.mu.Lock()
-		got := st.checkpoint
-		st.mu.Unlock()
-		t.Fatalf("%s: checkpoint = %d, want %d", msg, got, want)
+	}
+	expectNoSave := func(window time.Duration, when string) {
+		t.Helper()
+		select {
+		case got := <-saveCh:
+			t.Fatalf("unexpected save of chunk from=%d %s — committer did not hold back", got, when)
+		case <-time.After(window):
+		}
 	}
 
-	// Release [20,29] then [10,19]. Neither is next-expected so checkpoint
-	// must stay at 0.
+	// Release [20,29] then [10,19]. Neither is next-expected so the
+	// committer must hold both in pending and NOT call SaveEvents. The
+	// signal-based negative check fires immediately on a stray save rather
+	// than relying on a sleep being long enough.
 	close(gates[20])
 	close(gates[10])
-	time.Sleep(50 * time.Millisecond)
-	st.mu.Lock()
-	if st.checkpoint != 0 {
-		st.mu.Unlock()
-		t.Fatalf("checkpoint advanced before [0,9] released: %d", st.checkpoint)
-	}
-	st.mu.Unlock()
+	expectNoSave(100*time.Millisecond, "before [0,9] released")
 
-	// Releasing [0,9] should drain [0,9] → [10,19] → [20,29] in order →
-	// checkpoint jumps to 30.
+	// Releasing [0,9] drains [0,9] → [10,19] → [20,29] in order. Each save
+	// signal arrives as the committer makes the SaveEvents call.
 	close(gates[0])
-	checkpointEq(30, "after [0,9] released")
+	expectSave(0)
+	expectSave(10)
+	expectSave(20)
 
-	// Final chunk releases — checkpoint jumps to 40 and catchUp returns.
+	// Final chunk releases — fourth save fires and catchUp returns.
 	close(gates[30])
+	expectSave(30)
 	result := <-done
 	if result.err != nil {
 		t.Fatalf("catchUp: %v", result.err)
@@ -186,10 +198,17 @@ func TestCatchUpConcurrentOrderedCommits(t *testing.T) {
 		t.Fatalf("checkpoint = %d, want 40", st.checkpoint)
 	}
 
-	// Saved events must be in ascending block-number order (committer
-	// serializes saves in chunk order).
 	st.mu.Lock()
 	defer st.mu.Unlock()
+	wantOrder := []uint64{0, 10, 20, 30}
+	if len(st.saveOrder) != len(wantOrder) {
+		t.Fatalf("saveOrder = %v, want %v", st.saveOrder, wantOrder)
+	}
+	for i, want := range wantOrder {
+		if st.saveOrder[i] != want {
+			t.Fatalf("saveOrder[%d] = %d, want %d", i, st.saveOrder[i], want)
+		}
+	}
 	if len(st.events) != 4 {
 		t.Fatalf("events = %d, want 4", len(st.events))
 	}
