@@ -161,6 +161,7 @@ func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint ui
 		if err := i.store.RecordBlockHash(ctx, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
 			return 0, 0, fmt.Errorf("re-anchor head hash: %w", err)
 		}
+		i.log.Warn("re-anchoring on head; reorg detection suspended until cursor catches up", "head", newHead.Number, "oldest_stored", recent[0].Number, "gap", newHead.Number-recent[0].Number)
 		return newHead.Number, 0, nil
 	}
 

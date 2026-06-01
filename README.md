@@ -46,8 +46,14 @@ concurrency: 1
 # canonical block headers and walks parent-hash on each head reconcile to
 # detect divergence. Once the cursor is within `reorg_depth` of head, a reorg
 # shallower than this value is detected and rewound automatically. A reorg
-# deeper than `reorg_depth` is logged and the indexer exits — raise this
-# value and restart if you observe one.
+# deeper than `reorg_depth` (detected when the cursor is within `reorg_depth`
+# of head but the parent-hash walk can't find a common ancestor in that many
+# steps) is logged and the indexer exits — raise this value and restart if you
+# observe one. If the indexer was offline long enough that head outruns the
+# stored block hashes by more than `reorg_depth`, the indexer silently
+# re-anchors on the canonical head (logged as `re-anchoring on head`) —
+# events indexed prior to the offline window are trusted; raise `reorg_depth`
+# proportional to your expected downtime to keep this window narrow.
 reorg_depth: 64
 ```
 
