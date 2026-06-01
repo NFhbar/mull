@@ -63,6 +63,13 @@ directory.
   taken mid-crash may show transiently incomplete typed rows for that
   chunk. Decoders are pure functions of the input log, so replay
   reproduces the same rows exactly.
+- *Per-event sink writes* — raw `events` rows for a chunk are saved in one
+  batched transaction; typed-table inserts run one `INSERT OR IGNORE` per
+  event per matching sink. On a high-volume contract with many indexed
+  events per chunk, this is the dominant write cost vs. raw-only indexing.
+  Acceptable for typical single-contract indexing; a `HandleBatch` interface
+  or per-chunk `BEGIN/COMMIT` around dispatch would close the gap and is
+  tracked for a follow-up.
 
 ## Configuration
 

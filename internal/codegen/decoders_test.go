@@ -16,6 +16,11 @@ import (
 // from mainnet. Failure here is the same failure mode the live indexer would
 // hit, so a regression in the algorithm (e.g. comment 1's signed-extension bug,
 // adapted) gets caught even though internal/gen/ ships the empty bootstrap.
+//
+// TODO(codegen): exercise generated DecodeTransfer end-to-end — emit the golden
+// tree into a sibling testdata/genpkg/ package and run go test against it, or
+// extract helper bodies into a shared non-template file imported by both
+// runtime and tests, so this in-test reimplementation can be retired.
 func TestDecodeTransfer_USDC(t *testing.T) {
 	// USDC contract on Ethereum mainnet: 0xA0b8...eB48
 	// Tx 0x5d... block 19500000-ish (illustrative — the bytes are what matter).
@@ -114,6 +119,9 @@ func TestDecodeSignedBigIntTopic(t *testing.T) {
 // decodeSignedBigIntTopic mirrors the helper emitted into internal/gen/helpers.go
 // so the unit test above can exercise the algorithm without compiling the
 // generated package. Keep in lock-step with templates.go's helpersTemplate.
+//
+// TODO(codegen): retire this duplicate once tests compile the generated
+// helpers.go directly (see TestDecodeTransfer_USDC TODO above).
 func decodeSignedBigIntTopic(topic string, bits int) *big.Int {
 	out := new(big.Int)
 	out.SetBytes(common.FromHex(topic))

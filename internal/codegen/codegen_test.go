@@ -114,6 +114,43 @@ func TestGenerate_RejectsTupleType(t *testing.T) {
 	}
 }
 
+// TestGenerate_IndexedBytesN_NoMissingHelper verifies that an indexed bytesN
+// arg compiles without referencing a nonexistent decodeBytesNTopic helper —
+// the topic expression is inlined as `[N]byte(common.FromHex(...))` instead.
+func TestGenerate_IndexedBytesN_NoMissingHelper(t *testing.T) {
+	abiJSON := `[
+		{
+			"anonymous": false,
+			"inputs": [
+				{"indexed": true, "name": "key", "type": "bytes32"},
+				{"indexed": false, "name": "value", "type": "uint256"}
+			],
+			"name": "Pinged",
+			"type": "event"
+		}
+	]`
+	dir := t.TempDir()
+	abiPath := filepath.Join(dir, "pinged.json")
+	if err := os.WriteFile(abiPath, []byte(abiJSON), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	outDir := filepath.Join(dir, "out")
+	if _, err := Generate(GenerateConfig{AbiPath: abiPath, OutDir: outDir}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(outDir, "pinged.go"))
+	if err != nil {
+		t.Fatalf("read pinged.go: %v", err)
+	}
+	src := string(got)
+	if strings.Contains(src, "decodeBytes") {
+		t.Fatalf("generated pinged.go references missing decodeBytes* helper:\n%s", src)
+	}
+	if !strings.Contains(src, "[32]byte(common.FromHex(log.Topics[1]))") {
+		t.Fatalf("generated pinged.go missing inline [32]byte conversion:\n%s", src)
+	}
+}
+
 func TestGenerate_RequiresOutDir(t *testing.T) {
 	_, err := Generate(GenerateConfig{
 		AbiPath: filepath.Join("testdata", "erc20.abi.json"),
