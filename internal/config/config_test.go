@@ -45,6 +45,25 @@ func TestValidateReorgDepth(t *testing.T) {
 	}
 }
 
+func TestValidate_AbiPath(t *testing.T) {
+	cases := []struct {
+		name    string
+		abiPath string
+	}{
+		{"unset ok", ""},
+		{"non-empty ok (shape only — IO happens in cmd/codegen)", "./some/path.json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := baseValid()
+			c.AbiPath = tc.abiPath
+			if err := c.validate(); err != nil {
+				t.Fatalf("validate: %v, want nil", err)
+			}
+		})
+	}
+}
+
 func TestApplyDefaultsReorgDepth(t *testing.T) {
 	c := Config{}
 	c.applyDefaults()

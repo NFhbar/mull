@@ -22,6 +22,7 @@ type Options struct {
 	Concurrency  int
 	ReorgDepth   uint64
 	Logger       *slog.Logger
+	Sinks        []store.EventSink
 }
 
 type Indexer struct {
@@ -35,6 +36,7 @@ type Indexer struct {
 	concurrency  int
 	reorgDepth   uint64
 	log          *slog.Logger
+	sinks        []store.EventSink
 }
 
 func New(client rpc.Client, st store.Store, opts Options) *Indexer {
@@ -61,6 +63,7 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 		concurrency:  concurrency,
 		reorgDepth:   reorgDepth,
 		log:          logger.With("contract", opts.Contract),
+		sinks:        opts.Sinks,
 	}
 }
 
@@ -341,6 +344,13 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 				}
 				if err := i.store.SaveEvents(gctx, ready.events); err != nil {
 					return fmt.Errorf("save events: %w", err)
+				}
+				for _, ev := range ready.events {
+					for _, sink := range i.sinks {
+						if err := sink.Handle(gctx, ev); err != nil {
+							return fmt.Errorf("sink %s: %w", sink.SinkID(), err)
+						}
+					}
 				}
 				next := ready.to + 1
 				if err := i.store.SetCheckpoint(gctx, next); err != nil {

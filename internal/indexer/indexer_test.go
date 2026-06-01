@@ -828,6 +828,89 @@ func TestBackfillBlockHashesSwallowsMidWalkRPCError(t *testing.T) {
 	}
 }
 
+type fakeSink struct {
+	id        string
+	mu        sync.Mutex
+	handled   []store.Event
+	failOn    string
+	failErr   error
+}
+
+func (s *fakeSink) SinkID() string { return s.id }
+func (s *fakeSink) Handle(_ context.Context, e store.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failErr != nil && e.TxHash == s.failOn {
+		return s.failErr
+	}
+	s.handled = append(s.handled, e)
+	return nil
+}
+
+func TestRun_FansOutToSinks(t *testing.T) {
+	st := &fakeStore{}
+	r := &fakeRPC{
+		logsFor: func(from, to uint64) []rpc.Log {
+			return []rpc.Log{
+				{BlockNumber: from, TxHash: fmt.Sprintf("0xtx-%d", from), LogIndex: 0},
+			}
+		},
+	}
+	sinkA := &fakeSink{id: "a"}
+	sinkB := &fakeSink{id: "b"}
+	idx := New(r, st, Options{
+		Contract:  "0xc",
+		ChunkSize: 10,
+		Logger:    quietLogger(),
+		Sinks:     []store.EventSink{sinkA, sinkB},
+	})
+
+	next, err := idx.catchUp(context.Background(), 1, 25)
+	if err != nil {
+		t.Fatalf("catchUp: %v", err)
+	}
+	if next != 26 {
+		t.Fatalf("next = %d, want 26", next)
+	}
+
+	// Three chunks → three events; each event flows through both sinks.
+	for _, s := range []*fakeSink{sinkA, sinkB} {
+		s.mu.Lock()
+		got := len(s.handled)
+		s.mu.Unlock()
+		if got != 3 {
+			t.Fatalf("sink %s handled %d events, want 3", s.id, got)
+		}
+	}
+}
+
+func TestRun_SinkErrorAbortsRun(t *testing.T) {
+	st := &fakeStore{}
+	r := &fakeRPC{
+		logsFor: func(from, to uint64) []rpc.Log {
+			return []rpc.Log{
+				{BlockNumber: from, TxHash: fmt.Sprintf("0xtx-%d", from), LogIndex: 0},
+			}
+		},
+	}
+	sinkErr := errors.New("sink boom")
+	sink := &fakeSink{id: "boom", failOn: "0xtx-11", failErr: sinkErr}
+	idx := New(r, st, Options{
+		Contract:  "0xc",
+		ChunkSize: 10,
+		Logger:    quietLogger(),
+		Sinks:     []store.EventSink{sink},
+	})
+
+	_, err := idx.catchUp(context.Background(), 1, 25)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, sinkErr) {
+		t.Fatalf("err = %v, want wrap of %v", err, sinkErr)
+	}
+}
+
 func waitFor(cond func() bool, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

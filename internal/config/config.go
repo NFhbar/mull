@@ -23,6 +23,7 @@ type Config struct {
 	RPCRetryMaxAttempts int           `yaml:"rpc_retry_max_attempts"`
 	Concurrency         int           `yaml:"concurrency"`
 	ReorgDepth          uint64        `yaml:"reorg_depth"`
+	AbiPath             string        `yaml:"abi_path"`
 }
 
 func Load(path string) (*Config, error) {

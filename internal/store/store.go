@@ -27,3 +27,17 @@ type Store interface {
 	RewindTo(ctx context.Context, block uint64) error
 	Close() error
 }
+
+// EventSink is a typed-event consumer wired in by generated code.
+// Each generated sink targets exactly one event signature; sinks
+// are responsible for matching themselves against Topics[0] and
+// returning a nil error on signature mismatch (a no-op).
+//
+// Sinks MUST be idempotent on retry. Generated sinks satisfy this
+// by using INSERT OR IGNORE on (tx_hash, log_index); the indexer's
+// raw-events save, sink fan-out, and checkpoint advance run in
+// separate transactions, so a mid-chunk crash can replay any sink.
+type EventSink interface {
+	SinkID() string
+	Handle(ctx context.Context, e Event) error
+}

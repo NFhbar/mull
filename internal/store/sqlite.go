@@ -183,3 +183,5 @@ func (s *SQLite) RewindTo(ctx context.Context, block uint64) error {
 func (s *SQLite) Close() error {
 	return s.db.Close()
 }
+
+func (s *SQLite) DB() *sql.DB { return s.db }

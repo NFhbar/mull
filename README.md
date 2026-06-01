@@ -19,6 +19,51 @@ cp mull.example.yaml mull.yaml   # edit RPC URL, contract, topics, start_block
 
 Stop with `Ctrl-C`; the next run resumes from the last persisted block.
 
+Typed event decoding (per-event SQLite tables + Go structs) is opt-in via
+`mull codegen` — see [Codegen (optional)](#codegen-optional) below.
+
+## Codegen (optional)
+
+`mull codegen` reads a contract ABI and emits, for each event, a typed Go
+struct, a SQLite `CREATE TABLE` with typed columns, a decoder, and an
+`EventSink` implementation. The indexer wires the sinks alongside the raw
+`events` table — raw storage is preserved, typed tables are written in
+addition.
+
+**Lifecycle.** `abi_path` is a codegen *input*, not a runtime switch. The
+indexer never consults `abi_path`; whether typed indexing is active is
+determined entirely by the contents of the committed `internal/gen/`
+package at build time. Workflow:
+
+1. Set `abi_path:` in `mull.yaml` to your ABI JSON file.
+2. Run `mull codegen` — overwrites files under `internal/gen/`.
+3. Commit the regenerated files.
+4. Next `go build && mull index` picks up typed sinks automatically.
+
+**Invocation:**
+
+```sh
+./mull codegen --config mull.yaml --out internal/gen
+```
+
+`--out` defaults to `internal/gen`, resolved against the current working
+directory.
+
+**Caveats:**
+
+- *v1 type coverage* — `address`, `bool`, `uintN/intN` (N ≤ 256), `bytes`,
+  `bytesN` (1..32), `string`. Tuples and arrays are not yet supported;
+  ABIs containing unsupported types fail at codegen with a clear error.
+- *Atomicity* — the committer goroutine writes raw events, runs each sink,
+  then advances the checkpoint in separate transactions. If `mull index`
+  crashes mid-chunk, the raw `events` row, the per-event typed rows, and
+  the checkpoint can advance independently. On restart the chunk is
+  replayed; every generated sink uses `INSERT OR IGNORE` on
+  `(tx_hash, log_index)` so the final state converges, but a snapshot
+  taken mid-crash may show transiently incomplete typed rows for that
+  chunk. Decoders are pure functions of the input log, so replay
+  reproduces the same rows exactly.
+
 ## Configuration
 
 `mull.yaml`:
