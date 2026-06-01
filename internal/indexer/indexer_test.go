@@ -76,14 +76,14 @@ func (f *fakeRPC) BlockByHash(_ context.Context, hash string) (rpc.Header, error
 }
 
 type fakeStore struct {
-	mu             sync.Mutex
-	events         []store.Event
-	checkpoint     uint64
-	ranges         [][2]uint64
-	saveOrder      []uint64      // block_number of events[0] for each SaveEvents call
-	saveCh         chan uint64   // optional: signals on each SaveEvents call (tests that need synchronization)
-	blockHashes    map[uint64]store.BlockHashEntry
-	rewindToCalls  []uint64
+	mu            sync.Mutex
+	events        []store.Event
+	checkpoint    uint64
+	ranges        [][2]uint64
+	saveOrder     []uint64    // block_number of events[0] for each SaveEvents call
+	saveCh        chan uint64 // optional: signals on each SaveEvents call (tests that need synchronization)
+	blockHashes   map[uint64]store.BlockHashEntry
+	rewindToCalls []uint64
 }
 
 func (s *fakeStore) SaveEvents(_ context.Context, events []store.Event) error {
@@ -829,14 +829,16 @@ func TestBackfillBlockHashesSwallowsMidWalkRPCError(t *testing.T) {
 }
 
 type fakeSink struct {
-	id        string
-	mu        sync.Mutex
-	handled   []store.Event
-	failOn    string
-	failErr   error
+	id      string
+	topic0  string
+	mu      sync.Mutex
+	handled []store.Event
+	failOn  string
+	failErr error
 }
 
 func (s *fakeSink) SinkID() string { return s.id }
+func (s *fakeSink) Topic0() string { return s.topic0 }
 func (s *fakeSink) Handle(_ context.Context, e store.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -6,7 +6,7 @@ import (
 	"database/sql"
 )
 
-const SchemaDDL = `CREATE TABLE IF NOT EXISTS events_Approval (
+const SchemaDDL = `CREATE TABLE IF NOT EXISTS events_erc20_approval (
     block_number INTEGER NOT NULL,
     tx_hash      TEXT    NOT NULL,
     log_index    INTEGER NOT NULL,
@@ -16,7 +16,7 @@ const SchemaDDL = `CREATE TABLE IF NOT EXISTS events_Approval (
     PRIMARY KEY (tx_hash, log_index)
 );
 
-CREATE TABLE IF NOT EXISTS events_Transfer (
+CREATE TABLE IF NOT EXISTS events_erc20_transfer (
     block_number INTEGER NOT NULL,
     tx_hash      TEXT    NOT NULL,
     log_index    INTEGER NOT NULL,

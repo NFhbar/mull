@@ -10,7 +10,10 @@ import (
 	"github.com/NFhbar/mull/internal/config"
 )
 
-var codegenOutDir string
+var (
+	codegenOutDir string
+	codegenAlias  string
+)
 
 var codegenCmd = &cobra.Command{
 	Use:   "codegen",
@@ -38,8 +41,9 @@ once the generated files are committed the next build picks them up.`,
 			return fmt.Errorf("abi_path %q: is a directory, want a JSON file", cfg.AbiPath)
 		}
 		n, err := codegen.Generate(codegen.GenerateConfig{
-			AbiPath: cfg.AbiPath,
-			OutDir:  codegenOutDir,
+			AbiPath:       cfg.AbiPath,
+			OutDir:        codegenOutDir,
+			ContractAlias: codegenAlias,
 		})
 		if err != nil {
 			return err
@@ -51,5 +55,6 @@ once the generated files are committed the next build picks them up.`,
 
 func init() {
 	codegenCmd.Flags().StringVar(&codegenOutDir, "out", "internal/gen", "output directory for generated files (resolved against CWD)")
+	codegenCmd.Flags().StringVar(&codegenAlias, "alias", "", "contract alias namespacing the generated SQL tables (defaults to the ABI filename stem)")
 	rootCmd.AddCommand(codegenCmd)
 }

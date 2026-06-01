@@ -19,6 +19,10 @@ type typeMapping struct {
 	NeedsBigInt bool
 	// NeedsCommon is true when the Go value is common.Address / common.Hash.
 	NeedsCommon bool
+	// IsFixedBytes is true when the Go type is [N]byte for some compile-time N.
+	IsFixedBytes bool
+	// IsBytes is true when the Go type is []byte (dynamic).
+	IsBytes bool
 }
 
 // mapType returns the rendering metadata for a Solidity ABI type. v1 supports
@@ -60,17 +64,20 @@ func mapType(t abi.Type) (typeMapping, error) {
 				TopicExpr: fmt.Sprintf("int%d(decodeBigIntTopic(%%s).Int64())", t.Size),
 			}, nil
 		}
+		// Signed wide ints need two's-complement sign extension — see
+		// decodeSignedBigIntTopic in helpers.go.
 		return typeMapping{
 			GoType:      "*big.Int",
 			SQLType:     "TEXT",
-			TopicExpr:   "decodeBigIntTopic(%s)",
+			TopicExpr:   fmt.Sprintf("decodeSignedBigIntTopic(%%s, %d)", t.Size),
 			NeedsBigInt: true,
 		}, nil
 	case abi.FixedBytesTy:
 		return typeMapping{
-			GoType:    fmt.Sprintf("[%d]byte", t.Size),
-			SQLType:   "TEXT",
-			TopicExpr: fmt.Sprintf("decodeBytes%dTopic(%%s)", t.Size),
+			GoType:       fmt.Sprintf("[%d]byte", t.Size),
+			SQLType:      "TEXT",
+			TopicExpr:    fmt.Sprintf("decodeBytes%dTopic(%%s)", t.Size),
+			IsFixedBytes: true,
 		}, nil
 	case abi.BytesTy:
 		return typeMapping{
@@ -78,6 +85,7 @@ func mapType(t abi.Type) (typeMapping, error) {
 			SQLType: "BLOB",
 			// Indexed dynamic types are stored as keccak hashes, not values.
 			TopicExpr: "",
+			IsBytes:   true,
 		}, nil
 	case abi.StringTy:
 		return typeMapping{
@@ -98,9 +106,9 @@ func goValueExpr(m typeMapping, fieldRef string) string {
 		return fmt.Sprintf("bigIntStr(%s)", fieldRef)
 	case m.NeedsCommon:
 		return fmt.Sprintf("%s.Hex()", fieldRef)
-	case m.GoType == "[]byte":
+	case m.IsBytes:
 		return fieldRef
-	case len(m.GoType) >= 7 && m.GoType[0] == '[' && m.GoType[1] >= '0' && m.GoType[1] <= '9':
+	case m.IsFixedBytes:
 		return fmt.Sprintf("hexEncode(%s[:])", fieldRef)
 	}
 	return fieldRef

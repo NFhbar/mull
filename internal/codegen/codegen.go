@@ -23,6 +23,10 @@ import (
 type GenerateConfig struct {
 	AbiPath string
 	OutDir  string
+	// ContractAlias namespaces generated SQLite tables so two ABIs sharing an
+	// event name don't collide (e.g. two ERC-20s both emitting Transfer). When
+	// empty, falls back to the ABI file's basename stripped of extension.
+	ContractAlias string
 }
 
 type eventPlan struct {
@@ -74,12 +78,19 @@ func Generate(cfg GenerateConfig) (int, error) {
 		return 0, fmt.Errorf("mkdir out: %w", err)
 	}
 
+	alias := contractAlias(cfg)
+
 	plans := make([]eventPlan, 0, len(parsed.Events))
+	seenTables := make(map[string]string, len(parsed.Events))
 	for _, ev := range parsed.Events {
-		p, err := planEvent(ev)
+		p, err := planEvent(ev, alias)
 		if err != nil {
 			return 0, fmt.Errorf("event %s: %w", ev.Name, err)
 		}
+		if prev, ok := seenTables[p.TableName]; ok {
+			return 0, fmt.Errorf("event %s: table name %q collides with event %s (try a distinct contract_alias)", ev.Name, p.TableName, prev)
+		}
+		seenTables[p.TableName] = ev.Name
 		plans = append(plans, p)
 	}
 	sort.Slice(plans, func(i, j int) bool { return plans[i].Name < plans[j].Name })
@@ -114,11 +125,11 @@ func Generate(cfg GenerateConfig) (int, error) {
 	return len(plans), nil
 }
 
-func planEvent(ev abi.Event) (eventPlan, error) {
+func planEvent(ev abi.Event, alias string) (eventPlan, error) {
 	p := eventPlan{
 		Name:      ev.Name,
 		FileBase:  strings.ToLower(ev.Name),
-		TableName: "events_" + ev.Name,
+		TableName: "events_" + alias + "_" + snakeCase(ev.Name),
 		SigText:   eventSig(ev),
 	}
 	p.SigHash = crypto.Keccak256Hash([]byte(p.SigText)).Hex()
@@ -138,7 +149,7 @@ func planEvent(ev abi.Event) (eventPlan, error) {
 		}
 		field.IsBigInt = mapping.NeedsBigInt
 		field.IsCommon = mapping.NeedsCommon
-		field.IsBytes = mapping.GoType == "[]byte"
+		field.IsBytes = mapping.IsBytes
 		field.BindExpr = goValueExpr(mapping, "v."+field.Name)
 		if arg.Indexed {
 			if mapping.TopicExpr == "" {
@@ -201,6 +212,35 @@ func snakeCase(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// contractAlias resolves the SQL-table namespace prefix from cfg, falling back
+// to the ABI file's basename stripped of extension when ContractAlias is empty.
+// The result is lowercased and stripped of non-identifier characters so the
+// emitted table identifier is safe without quoting.
+func contractAlias(cfg GenerateConfig) string {
+	raw := cfg.ContractAlias
+	if raw == "" {
+		base := filepath.Base(cfg.AbiPath)
+		if i := strings.IndexByte(base, '.'); i >= 0 {
+			base = base[:i]
+		}
+		raw = base
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(unicode.ToLower(r))
+		case r == '_' || r == '-':
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		out = "contract"
+	}
+	return out
 }
 
 func renderTemplate(name, tmplStr string, data any) ([]byte, error) {

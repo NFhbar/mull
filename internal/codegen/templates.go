@@ -81,6 +81,20 @@ func decodeBigIntTopic(topic string) *big.Int {
 	return out
 }
 
+// decodeSignedBigIntTopic decodes a Solidity-signed integer topic word using
+// two's-complement sign extension. The unsigned helper above sees 0xff..ff as
+// 2^256-1; for intN we instead return -1 by subtracting 1<<bits when the sign
+// bit is set.
+func decodeSignedBigIntTopic(topic string, bits int) *big.Int {
+	out := new(big.Int)
+	out.SetBytes(common.FromHex(topic))
+	if out.Bit(bits-1) == 1 {
+		mod := new(big.Int).Lsh(big.NewInt(1), uint(bits))
+		out.Sub(out, mod)
+	}
+	return out
+}
+
 func decodeBoolTopic(topic string) bool {
 	b := common.FromHex(topic)
 	for _, c := range b {
@@ -140,7 +154,7 @@ func Decode{{.Name}}(log store.Event) ({{.Name}}, error) {
 	if len(log.Topics) < {{ len .IndexedArgs | plus1 }} {
 		return out, fmt.Errorf("{{.Name}}: need {{ len .IndexedArgs | plus1 }} topics, got %d", len(log.Topics))
 	}
-	if log.Topics[0] != {{.Name}}EventSig {
+	if common.HexToHash(log.Topics[0]) != common.HexToHash({{.Name}}EventSig) {
 		return out, fmt.Errorf("{{.Name}}: topic0 mismatch: %s", log.Topics[0])
 	}
 {{- range .IndexedArgs }}
@@ -176,8 +190,10 @@ func new{{.Name}}Sink(db *sql.DB) *{{.FileBase}}Sink {
 
 func (s *{{.FileBase}}Sink) SinkID() string { return "{{.Name}}" }
 
+func (s *{{.FileBase}}Sink) Topic0() string { return {{.Name}}EventSig }
+
 func (s *{{.FileBase}}Sink) Handle(ctx context.Context, e store.Event) error {
-	if len(e.Topics) == 0 || e.Topics[0] != {{.Name}}EventSig {
+	if len(e.Topics) == 0 || common.HexToHash(e.Topics[0]) != common.HexToHash({{.Name}}EventSig) {
 		return nil
 	}
 	v, err := Decode{{.Name}}(e)

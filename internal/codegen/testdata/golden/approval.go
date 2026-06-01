@@ -42,7 +42,7 @@ func DecodeApproval(log store.Event) (Approval, error) {
 	if len(log.Topics) < 3 {
 		return out, fmt.Errorf("Approval: need 3 topics, got %d", len(log.Topics))
 	}
-	if log.Topics[0] != ApprovalEventSig {
+	if common.HexToHash(log.Topics[0]) != common.HexToHash(ApprovalEventSig) {
 		return out, fmt.Errorf("Approval: topic0 mismatch: %s", log.Topics[0])
 	}
 	out.Owner = common.HexToAddress(log.Topics[1])
@@ -73,8 +73,10 @@ func newApprovalSink(db *sql.DB) *approvalSink {
 
 func (s *approvalSink) SinkID() string { return "Approval" }
 
+func (s *approvalSink) Topic0() string { return ApprovalEventSig }
+
 func (s *approvalSink) Handle(ctx context.Context, e store.Event) error {
-	if len(e.Topics) == 0 || e.Topics[0] != ApprovalEventSig {
+	if len(e.Topics) == 0 || common.HexToHash(e.Topics[0]) != common.HexToHash(ApprovalEventSig) {
 		return nil
 	}
 	v, err := DecodeApproval(e)
@@ -82,7 +84,7 @@ func (s *approvalSink) Handle(ctx context.Context, e store.Event) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO events_Approval (block_number, tx_hash, log_index, "owner", "spender", "value") VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO events_erc20_approval (block_number, tx_hash, log_index, "owner", "spender", "value") VALUES (?, ?, ?, ?, ?, ?)`,
 		e.BlockNumber, e.TxHash, e.LogIndex, v.Owner.Hex(), v.Spender.Hex(), bigIntStr(v.Value),
 	)
 	return err

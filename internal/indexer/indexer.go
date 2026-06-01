@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/NFhbar/mull/internal/rpc"
@@ -36,7 +37,13 @@ type Indexer struct {
 	concurrency  int
 	reorgDepth   uint64
 	log          *slog.Logger
-	sinks        []store.EventSink
+	// sinksByTopic0 dispatches events in O(1) by their first topic. Built once
+	// in New from opts.Sinks; the canonical key is common.HexToHash(topic0).Hex()
+	// so casing differences between RPC providers can't cause silent no-ops.
+	sinksByTopic0 map[string][]store.EventSink
+	// wildcardSinks receive every event (used by sinks that return an empty
+	// Topic0(), e.g. test fakes that want to observe everything).
+	wildcardSinks []store.EventSink
 }
 
 func New(client rpc.Client, st store.Store, opts Options) *Indexer {
@@ -52,18 +59,30 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 	if reorgDepth == 0 {
 		reorgDepth = 64
 	}
+	sinksByTopic0 := make(map[string][]store.EventSink)
+	var wildcardSinks []store.EventSink
+	for _, s := range opts.Sinks {
+		t := s.Topic0()
+		if t == "" {
+			wildcardSinks = append(wildcardSinks, s)
+			continue
+		}
+		key := common.HexToHash(t).Hex()
+		sinksByTopic0[key] = append(sinksByTopic0[key], s)
+	}
 	return &Indexer{
-		rpc:          client,
-		store:        st,
-		contract:     opts.Contract,
-		topics:       opts.Topics,
-		chunkSize:    opts.ChunkSize,
-		pollInterval: opts.PollInterval,
-		startBlock:   opts.StartBlock,
-		concurrency:  concurrency,
-		reorgDepth:   reorgDepth,
-		log:          logger.With("contract", opts.Contract),
-		sinks:        opts.Sinks,
+		rpc:           client,
+		store:         st,
+		contract:      opts.Contract,
+		topics:        opts.Topics,
+		chunkSize:     opts.ChunkSize,
+		pollInterval:  opts.PollInterval,
+		startBlock:    opts.StartBlock,
+		concurrency:   concurrency,
+		reorgDepth:    reorgDepth,
+		log:           logger.With("contract", opts.Contract),
+		sinksByTopic0: sinksByTopic0,
+		wildcardSinks: wildcardSinks,
 	}
 }
 
@@ -346,10 +365,8 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 					return fmt.Errorf("save events: %w", err)
 				}
 				for _, ev := range ready.events {
-					for _, sink := range i.sinks {
-						if err := sink.Handle(gctx, ev); err != nil {
-							return fmt.Errorf("sink %s: %w", sink.SinkID(), err)
-						}
+					if err := i.dispatchSinks(gctx, ev); err != nil {
+						return err
 					}
 				}
 				next := ready.to + 1
@@ -379,6 +396,27 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 		return committed, err
 	}
 	return committed, nil
+}
+
+// dispatchSinks fans an event out to wildcard sinks (always) and the per-topic
+// bucket keyed by canonical-cased Topics[0] (when present). Casing differs
+// across RPC providers, so the key is normalized via common.HexToHash.
+func (i *Indexer) dispatchSinks(ctx context.Context, ev store.Event) error {
+	for _, sink := range i.wildcardSinks {
+		if err := sink.Handle(ctx, ev); err != nil {
+			return fmt.Errorf("sink %s: %w", sink.SinkID(), err)
+		}
+	}
+	if len(ev.Topics) == 0 {
+		return nil
+	}
+	key := common.HexToHash(ev.Topics[0]).Hex()
+	for _, sink := range i.sinksByTopic0[key] {
+		if err := sink.Handle(ctx, ev); err != nil {
+			return fmt.Errorf("sink %s: %w", sink.SinkID(), err)
+		}
+	}
+	return nil
 }
 
 func toEvents(logs []rpc.Log) []store.Event {

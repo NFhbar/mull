@@ -42,7 +42,7 @@ func DecodeTransfer(log store.Event) (Transfer, error) {
 	if len(log.Topics) < 3 {
 		return out, fmt.Errorf("Transfer: need 3 topics, got %d", len(log.Topics))
 	}
-	if log.Topics[0] != TransferEventSig {
+	if common.HexToHash(log.Topics[0]) != common.HexToHash(TransferEventSig) {
 		return out, fmt.Errorf("Transfer: topic0 mismatch: %s", log.Topics[0])
 	}
 	out.From = common.HexToAddress(log.Topics[1])
@@ -73,8 +73,10 @@ func newTransferSink(db *sql.DB) *transferSink {
 
 func (s *transferSink) SinkID() string { return "Transfer" }
 
+func (s *transferSink) Topic0() string { return TransferEventSig }
+
 func (s *transferSink) Handle(ctx context.Context, e store.Event) error {
-	if len(e.Topics) == 0 || e.Topics[0] != TransferEventSig {
+	if len(e.Topics) == 0 || common.HexToHash(e.Topics[0]) != common.HexToHash(TransferEventSig) {
 		return nil
 	}
 	v, err := DecodeTransfer(e)
@@ -82,7 +84,7 @@ func (s *transferSink) Handle(ctx context.Context, e store.Event) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO events_Transfer (block_number, tx_hash, log_index, "from", "to", "value") VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO events_erc20_transfer (block_number, tx_hash, log_index, "from", "to", "value") VALUES (?, ?, ?, ?, ?, ?)`,
 		e.BlockNumber, e.TxHash, e.LogIndex, v.From.Hex(), v.To.Hex(), bigIntStr(v.Value),
 	)
 	return err

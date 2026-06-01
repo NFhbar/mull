@@ -25,6 +25,20 @@ func decodeBigIntTopic(topic string) *big.Int {
 	return out
 }
 
+// decodeSignedBigIntTopic decodes a Solidity-signed integer topic word using
+// two's-complement sign extension. The unsigned helper above sees 0xff..ff as
+// 2^256-1; for intN we instead return -1 by subtracting 1<<bits when the sign
+// bit is set.
+func decodeSignedBigIntTopic(topic string, bits int) *big.Int {
+	out := new(big.Int)
+	out.SetBytes(common.FromHex(topic))
+	if out.Bit(bits-1) == 1 {
+		mod := new(big.Int).Lsh(big.NewInt(1), uint(bits))
+		out.Sub(out, mod)
+	}
+	return out
+}
+
 func decodeBoolTopic(topic string) bool {
 	b := common.FromHex(topic)
 	for _, c := range b {
