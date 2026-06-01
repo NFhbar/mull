@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/NFhbar/mull/internal/rpc"
@@ -22,6 +23,7 @@ type Options struct {
 	Concurrency  int
 	ReorgDepth   uint64
 	Logger       *slog.Logger
+	Sinks        []store.EventSink
 }
 
 type Indexer struct {
@@ -35,6 +37,17 @@ type Indexer struct {
 	concurrency  int
 	reorgDepth   uint64
 	log          *slog.Logger
+	// sinksByTopic0 dispatches events in O(1) by their first topic. Built once
+	// in New from opts.Sinks; the canonical key is common.HexToHash(topic0).Hex()
+	// so casing differences between RPC providers can't cause silent no-ops.
+	sinksByTopic0 map[string][]store.EventSink
+	// wildcardSinks receive every event (used by sinks that return an empty
+	// Topic0(), e.g. test fakes that want to observe everything).
+	wildcardSinks []store.EventSink
+	// allSinks preserves opts.Sinks in registration order. rewindSinks walks
+	// this so partial-failure residue is deterministic across runs — map
+	// iteration over sinksByTopic0 is not.
+	allSinks []store.EventSink
 }
 
 func New(client rpc.Client, st store.Store, opts Options) *Indexer {
@@ -50,17 +63,33 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 	if reorgDepth == 0 {
 		reorgDepth = 64
 	}
+	sinksByTopic0 := make(map[string][]store.EventSink)
+	var wildcardSinks []store.EventSink
+	allSinks := make([]store.EventSink, len(opts.Sinks))
+	copy(allSinks, opts.Sinks)
+	for _, s := range opts.Sinks {
+		t := s.Topic0()
+		if t == "" {
+			wildcardSinks = append(wildcardSinks, s)
+			continue
+		}
+		key := common.HexToHash(t).Hex()
+		sinksByTopic0[key] = append(sinksByTopic0[key], s)
+	}
 	return &Indexer{
-		rpc:          client,
-		store:        st,
-		contract:     opts.Contract,
-		topics:       opts.Topics,
-		chunkSize:    opts.ChunkSize,
-		pollInterval: opts.PollInterval,
-		startBlock:   opts.StartBlock,
-		concurrency:  concurrency,
-		reorgDepth:   reorgDepth,
-		log:          logger.With("contract", opts.Contract),
+		rpc:           client,
+		store:         st,
+		contract:      opts.Contract,
+		topics:        opts.Topics,
+		chunkSize:     opts.ChunkSize,
+		pollInterval:  opts.PollInterval,
+		startBlock:    opts.StartBlock,
+		concurrency:   concurrency,
+		reorgDepth:    reorgDepth,
+		log:           logger.With("contract", opts.Contract),
+		sinksByTopic0: sinksByTopic0,
+		wildcardSinks: wildcardSinks,
+		allSinks:      allSinks,
 	}
 }
 
@@ -200,6 +229,14 @@ func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint ui
 	mostRecent := recent[0]
 	if mostRecent.Number > ancestor.Number {
 		rewindTarget := ancestor.Number + 1
+		// rewindSinks runs before store.RewindTo so a sink failure leaves the
+		// store untouched; the next reconcileHead re-detects the same reorg
+		// and retries the whole rewind from scratch. Generated sink rewinds
+		// are `DELETE FROM <table> WHERE block_number >= ?` — idempotent, so
+		// partial progress on the retry is safe.
+		if err := i.rewindSinks(ctx, rewindTarget); err != nil {
+			return 0, 0, err
+		}
 		if err := i.store.RewindTo(ctx, rewindTarget); err != nil {
 			return 0, 0, fmt.Errorf("rewind to %d: %w", rewindTarget, err)
 		}
@@ -342,6 +379,11 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 				if err := i.store.SaveEvents(gctx, ready.events); err != nil {
 					return fmt.Errorf("save events: %w", err)
 				}
+				for _, ev := range ready.events {
+					if err := i.dispatchSinks(gctx, ev); err != nil {
+						return err
+					}
+				}
 				next := ready.to + 1
 				if err := i.store.SetCheckpoint(gctx, next); err != nil {
 					return fmt.Errorf("set checkpoint: %w", err)
@@ -369,6 +411,40 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 		return committed, err
 	}
 	return committed, nil
+}
+
+// rewindSinks fans a rewind through every registered sink so each generated
+// typed table drops orphaned rows from blocks ≥ block. Iterates allSinks
+// (registration order) rather than sinksByTopic0 (a Go map) so the on-disk
+// residue from a partial-failure mid-fanout is deterministic across runs.
+func (i *Indexer) rewindSinks(ctx context.Context, block uint64) error {
+	for _, sink := range i.allSinks {
+		if err := sink.RewindTo(ctx, block); err != nil {
+			return fmt.Errorf("sink %s rewind: %w", sink.SinkID(), err)
+		}
+	}
+	return nil
+}
+
+// dispatchSinks fans an event out to wildcard sinks (always) and the per-topic
+// bucket keyed by canonical-cased Topics[0] (when present). Casing differs
+// across RPC providers, so the key is normalized via common.HexToHash.
+func (i *Indexer) dispatchSinks(ctx context.Context, ev store.Event) error {
+	for _, sink := range i.wildcardSinks {
+		if err := sink.Handle(ctx, ev); err != nil {
+			return fmt.Errorf("sink %s: %w", sink.SinkID(), err)
+		}
+	}
+	if len(ev.Topics) == 0 {
+		return nil
+	}
+	key := common.HexToHash(ev.Topics[0]).Hex()
+	for _, sink := range i.sinksByTopic0[key] {
+		if err := sink.Handle(ctx, ev); err != nil {
+			return fmt.Errorf("sink %s: %w", sink.SinkID(), err)
+		}
+	}
+	return nil
 }
 
 func toEvents(logs []rpc.Log) []store.Event {

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/NFhbar/mull/internal/config"
+	"github.com/NFhbar/mull/internal/gen"
 	"github.com/NFhbar/mull/internal/indexer"
 	"github.com/NFhbar/mull/internal/rpc"
 	"github.com/NFhbar/mull/internal/store"
@@ -49,6 +50,11 @@ func runIndex(ctx context.Context) error {
 	}
 	defer st.Close()
 
+	if err := gen.ApplySchema(ctx, st.DB()); err != nil {
+		return fmt.Errorf("apply generated schema: %w", err)
+	}
+	sinks := gen.NewSinks(st.DB())
+
 	idx := indexer.New(rpc.NewHTTPClient(cfg.RPCURL, nil, rpc.RetryPolicy{
 		Base:        cfg.RPCRetryBase,
 		MaxDelay:    cfg.RPCRetryMaxDelay,
@@ -62,6 +68,7 @@ func runIndex(ctx context.Context) error {
 		Concurrency:  cfg.Concurrency,
 		ReorgDepth:   cfg.ReorgDepth,
 		Logger:       logger,
+		Sinks:        sinks,
 	})
 	return idx.Run(ctx)
 }

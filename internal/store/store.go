@@ -27,3 +27,28 @@ type Store interface {
 	RewindTo(ctx context.Context, block uint64) error
 	Close() error
 }
+
+// EventSink is a typed-event consumer wired in by generated code.
+// Each generated sink targets exactly one event signature; the
+// indexer dispatches by Topic0() in O(1) per event. A sink may
+// return an empty Topic0() to opt out of the dispatch index and
+// receive every event (wildcard), in which case it is responsible
+// for filtering itself.
+//
+// Sinks MUST be idempotent on retry. Generated sinks satisfy this
+// by using INSERT OR IGNORE on (tx_hash, log_index); the indexer's
+// raw-events save, sink fan-out, and checkpoint advance run in
+// separate transactions, so a mid-chunk crash can replay any sink.
+//
+// RewindTo mirrors Store.RewindTo for each sink's own table — the
+// indexer fans the rewind through every sink on reorg so typed
+// tables stay consistent with the raw events table. Without this
+// hook, orphaned rows on the abandoned fork would linger and
+// SELECTs would return a union of forks (see reorg path in
+// Indexer.reconcileHead).
+type EventSink interface {
+	SinkID() string
+	Topic0() string
+	Handle(ctx context.Context, e Event) error
+	RewindTo(ctx context.Context, block uint64) error
+}

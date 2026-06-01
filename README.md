@@ -19,6 +19,74 @@ cp mull.example.yaml mull.yaml   # edit RPC URL, contract, topics, start_block
 
 Stop with `Ctrl-C`; the next run resumes from the last persisted block.
 
+Typed event decoding (per-event SQLite tables + Go structs) is opt-in via
+`mull codegen` — see [Codegen (optional)](#codegen-optional) below.
+
+## Codegen (optional)
+
+`mull codegen` reads a contract ABI and emits, for each event, a typed Go
+struct, a SQLite `CREATE TABLE` with typed columns, a decoder, and an
+`EventSink` implementation. The indexer wires the sinks alongside the raw
+`events` table — raw storage is preserved, typed tables are written in
+addition.
+
+**Lifecycle.** `abi_path` is a codegen *input*, not a runtime switch. The
+indexer never consults `abi_path`; whether typed indexing is active is
+determined entirely by the contents of the committed `internal/gen/`
+package at build time. Workflow:
+
+1. Set `abi_path:` in `mull.yaml` to your ABI JSON file.
+2. Run `mull codegen` — overwrites files under `internal/gen/`.
+3. Commit the regenerated files.
+4. Next `go build && mull index` picks up typed sinks automatically.
+
+**Invocation:**
+
+```sh
+./mull codegen --config mull.yaml --out internal/gen
+./mull codegen --config mull.yaml --out internal/gen --alias myproject
+```
+
+`--out` defaults to `internal/gen`, resolved against the current working
+directory.
+
+`--alias` namespaces the generated SQL tables — `events_<alias>_<event>`.
+Defaults to the ABI filename stem (`abi/foo.json` → `events_foo_<event>`).
+Override when ingesting multiple contracts that share an event name, e.g.
+two ERC-20s would both emit `events_<alias>_transfer` and collide without
+distinct aliases.
+
+**Caveats:**
+
+- *v1 type coverage* — `address`, `bool`, `uintN/intN` (N ≤ 256), `bytes`,
+  `bytesN` (1..32), `string`. Tuples and arrays are not yet supported;
+  ABIs containing unsupported types fail at codegen with a clear error.
+- *Schema regeneration* — `ApplySchema` runs `CREATE TABLE IF NOT EXISTS`
+  on every `mull index` startup, which is correct for first-run and for
+  *adding* new event tables to an existing deployment. It silently no-ops
+  on shape changes, so if you regenerate an event with a different field
+  set (e.g. ABI gains an indexed `nonce` arg) the typed table on disk
+  keeps the old columns and the next matching event aborts the indexer
+  with `no such column: <name>`. mull has no migration tool by design;
+  drop or migrate the affected `events_<alias>_<event>` table manually
+  before resuming, then `mull index` rebuilds it via codegen-emitted DDL.
+- *Atomicity* — the committer goroutine writes raw events, runs each sink,
+  then advances the checkpoint in separate transactions. If `mull index`
+  crashes mid-chunk, the raw `events` row, the per-event typed rows, and
+  the checkpoint can advance independently. On restart the chunk is
+  replayed; every generated sink uses `INSERT OR IGNORE` on
+  `(tx_hash, log_index)` so the final state converges, but a snapshot
+  taken mid-crash may show transiently incomplete typed rows for that
+  chunk. Decoders are pure functions of the input log, so replay
+  reproduces the same rows exactly.
+- *Per-event sink writes* — raw `events` rows for a chunk are saved in one
+  batched transaction; typed-table inserts run one `INSERT OR IGNORE` per
+  event per matching sink. On a high-volume contract with many indexed
+  events per chunk, this is the dominant write cost vs. raw-only indexing.
+  Acceptable for typical single-contract indexing; a `HandleBatch` interface
+  or per-chunk `BEGIN/COMMIT` around dispatch would close the gap and is
+  tracked for a follow-up.
+
 ## Configuration
 
 `mull.yaml`:
