@@ -22,6 +22,7 @@ type Config struct {
 	RPCRetryMaxDelay    time.Duration `yaml:"rpc_retry_max_delay"`
 	RPCRetryMaxAttempts int           `yaml:"rpc_retry_max_attempts"`
 	Concurrency         int           `yaml:"concurrency"`
+	ReorgDepth          uint64        `yaml:"reorg_depth"`
 }
 
 func Load(path string) (*Config, error) {
@@ -60,6 +61,9 @@ func (c *Config) applyDefaults() {
 	if c.Concurrency == 0 {
 		c.Concurrency = 1
 	}
+	if c.ReorgDepth == 0 {
+		c.ReorgDepth = 64
+	}
 }
 
 func (c *Config) validate() error {
@@ -86,6 +90,9 @@ func (c *Config) validate() error {
 	}
 	if c.Concurrency < 1 || c.Concurrency > 8 {
 		return fmt.Errorf("concurrency must be between 1 and 8")
+	}
+	if c.ReorgDepth < 1 || c.ReorgDepth > 1024 {
+		return fmt.Errorf("reorg_depth must be between 1 and 1024")
 	}
 	return nil
 }

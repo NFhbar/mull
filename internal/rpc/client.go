@@ -21,9 +21,17 @@ type Log struct {
 	Data        string
 }
 
+type Header struct {
+	Number     uint64
+	Hash       string
+	ParentHash string
+}
+
 type Client interface {
 	BlockNumber(ctx context.Context) (uint64, error)
 	GetLogs(ctx context.Context, from, to uint64, address string, topics []string) ([]Log, error)
+	BlockByNumber(ctx context.Context, tag string) (Header, error)
+	BlockByHash(ctx context.Context, hash string) (Header, error)
 }
 
 type HTTPClient struct {
@@ -133,7 +141,43 @@ func (c *HTTPClient) BlockNumber(ctx context.Context) (uint64, error) {
 	if err := c.call(ctx, "eth_blockNumber", []any{}, &hex); err != nil {
 		return 0, err
 	}
-	return parseHexUint64(hex)
+	return ParseHexUint64(hex)
+}
+
+type rawBlockHeader struct {
+	Number     string `json:"number"`
+	Hash       string `json:"hash"`
+	ParentHash string `json:"parentHash"`
+}
+
+func decodeHeader(raw *rawBlockHeader) (Header, error) {
+	n, err := ParseHexUint64(raw.Number)
+	if err != nil {
+		return Header{}, fmt.Errorf("parse block number %q: %w", raw.Number, err)
+	}
+	return Header{Number: n, Hash: raw.Hash, ParentHash: raw.ParentHash}, nil
+}
+
+func (c *HTTPClient) BlockByNumber(ctx context.Context, tag string) (Header, error) {
+	var raw *rawBlockHeader
+	if err := c.call(ctx, "eth_getBlockByNumber", []any{tag, false}, &raw); err != nil {
+		return Header{}, err
+	}
+	if raw == nil {
+		return Header{}, fmt.Errorf("block not found: %s", tag)
+	}
+	return decodeHeader(raw)
+}
+
+func (c *HTTPClient) BlockByHash(ctx context.Context, hash string) (Header, error) {
+	var raw *rawBlockHeader
+	if err := c.call(ctx, "eth_getBlockByHash", []any{hash, false}, &raw); err != nil {
+		return Header{}, err
+	}
+	if raw == nil {
+		return Header{}, fmt.Errorf("block not found: %s", hash)
+	}
+	return decodeHeader(raw)
 }
 
 type logFilter struct {
@@ -154,8 +198,8 @@ type rawLog struct {
 
 func (c *HTTPClient) GetLogs(ctx context.Context, from, to uint64, address string, topics []string) ([]Log, error) {
 	filter := logFilter{
-		FromBlock: hexUint64(from),
-		ToBlock:   hexUint64(to),
+		FromBlock: HexUint64(from),
+		ToBlock:   HexUint64(to),
 		Address:   address,
 		Topics:    topics,
 	}
@@ -165,11 +209,11 @@ func (c *HTTPClient) GetLogs(ctx context.Context, from, to uint64, address strin
 	}
 	logs := make([]Log, 0, len(raws))
 	for _, r := range raws {
-		bn, err := parseHexUint64(r.BlockNumber)
+		bn, err := ParseHexUint64(r.BlockNumber)
 		if err != nil {
 			return nil, fmt.Errorf("parse block number %q: %w", r.BlockNumber, err)
 		}
-		li, err := parseHexUint64(r.LogIndex)
+		li, err := ParseHexUint64(r.LogIndex)
 		if err != nil {
 			return nil, fmt.Errorf("parse log index %q: %w", r.LogIndex, err)
 		}
@@ -185,11 +229,11 @@ func (c *HTTPClient) GetLogs(ctx context.Context, from, to uint64, address strin
 	return logs, nil
 }
 
-func hexUint64(n uint64) string {
+func HexUint64(n uint64) string {
 	return "0x" + strconv.FormatUint(n, 16)
 }
 
-func parseHexUint64(s string) (uint64, error) {
+func ParseHexUint64(s string) (uint64, error) {
 	return strconv.ParseUint(strings.TrimPrefix(s, "0x"), 16, 64)
 }
 

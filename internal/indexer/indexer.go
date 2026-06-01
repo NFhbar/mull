@@ -20,6 +20,7 @@ type Options struct {
 	PollInterval time.Duration
 	StartBlock   uint64
 	Concurrency  int
+	ReorgDepth   uint64
 	Logger       *slog.Logger
 }
 
@@ -32,6 +33,7 @@ type Indexer struct {
 	pollInterval time.Duration
 	startBlock   uint64
 	concurrency  int
+	reorgDepth   uint64
 	log          *slog.Logger
 }
 
@@ -44,6 +46,10 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 	if concurrency < 1 {
 		concurrency = 1
 	}
+	reorgDepth := opts.ReorgDepth
+	if reorgDepth == 0 {
+		reorgDepth = 64
+	}
 	return &Indexer{
 		rpc:          client,
 		store:        st,
@@ -53,6 +59,7 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 		pollInterval: opts.PollInterval,
 		startBlock:   opts.StartBlock,
 		concurrency:  concurrency,
+		reorgDepth:   reorgDepth,
 		log:          logger.With("contract", opts.Contract),
 	}
 }
@@ -69,16 +76,45 @@ func (i *Indexer) Run(ctx context.Context) error {
 	}
 	i.log.Info("indexer starting", "from_block", cursor)
 
+	// Peek at head once so we can skip the backfill when the cursor is more
+	// than reorg_depth blocks behind: in that case the first reconcileHead
+	// will re-anchor on head and evict any backfilled entries via the cap,
+	// so the backfill's RPC calls would be wasted.
+	startHead, err := i.rpc.BlockByNumber(ctx, "latest")
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return fmt.Errorf("fetch initial head: %w", err)
+	}
+	if startHead.Number <= cursor+i.reorgDepth {
+		if err := i.backfillBlockHashes(ctx, cursor); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+	} else {
+		i.log.Info("skipping block_hashes backfill — cursor more than reorg_depth behind head",
+			"cursor", cursor, "head", startHead.Number, "reorg_depth", i.reorgDepth)
+	}
+
 	ticker := time.NewTicker(i.pollInterval)
 	defer ticker.Stop()
 
 	for {
-		head, err := i.rpc.BlockNumber(ctx)
+		head, cursorHint, err := i.reconcileHead(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
-			return fmt.Errorf("fetch head: %w", err)
+			return err
+		}
+		if cursorHint != 0 {
+			cursor = cursorHint
+			if cursor < i.startBlock {
+				cursor = i.startBlock
+			}
 		}
 		cursor, err = i.catchUp(ctx, cursor, head)
 		if err != nil {
@@ -94,6 +130,127 @@ func (i *Indexer) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// reconcileHead fetches the canonical head, walks back via parent-hash to find
+// a common ancestor with stored hashes, and rewinds the store on divergence.
+// cursorHint is non-zero only when a rewind occurred; the caller must replace
+// its in-memory cursor with cursorHint so catchUp re-fetches the rewound range.
+func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint uint64, err error) {
+	newHead, err := i.rpc.BlockByNumber(ctx, "latest")
+	if err != nil {
+		return 0, 0, fmt.Errorf("fetch head header: %w", err)
+	}
+
+	recent, err := i.store.RecentBlockHashes(ctx, 1)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read recent hashes: %w", err)
+	}
+	if len(recent) == 0 {
+		if err := i.store.RecordBlockHash(ctx, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
+			return 0, 0, fmt.Errorf("seed head hash: %w", err)
+		}
+		return newHead.Number, 0, nil
+	}
+
+	// Gap larger than reorg_depth: a parent-hash walk can't reach the stored
+	// range in i.reorgDepth steps, so reorg detection isn't meaningful here.
+	// Re-anchor on the canonical head and let catchUp resume; reorg detection
+	// re-arms once the cursor advances to within reorg_depth of the tip.
+	if newHead.Number > recent[0].Number+i.reorgDepth {
+		if err := i.store.RecordBlockHash(ctx, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
+			return 0, 0, fmt.Errorf("re-anchor head hash: %w", err)
+		}
+		i.log.Warn("re-anchoring on head; reorg detection suspended until cursor catches up", "head", newHead.Number, "oldest_stored", recent[0].Number, "gap", newHead.Number-recent[0].Number)
+		return newHead.Number, 0, nil
+	}
+
+	walked := []rpc.Header{newHead}
+	cur := newHead
+	var ancestor *rpc.Header
+	for steps := uint64(0); steps < i.reorgDepth; steps++ {
+		stored, ok, err := i.store.BlockHashAt(ctx, cur.Number)
+		if err != nil {
+			return 0, 0, fmt.Errorf("lookup stored hash: %w", err)
+		}
+		if ok && stored.Hash == cur.Hash {
+			a := cur
+			ancestor = &a
+			break
+		}
+		if cur.Number == 0 {
+			a := cur
+			ancestor = &a
+			break
+		}
+		if cur.ParentHash == "" {
+			return 0, 0, fmt.Errorf("walk: empty parentHash at block %d", cur.Number)
+		}
+		parent, err := i.rpc.BlockByHash(ctx, cur.ParentHash)
+		if err != nil {
+			return 0, 0, fmt.Errorf("walk back from %d: %w", cur.Number, err)
+		}
+		cur = parent
+		walked = append(walked, cur)
+	}
+	if ancestor == nil {
+		return 0, 0, fmt.Errorf("reorg deeper than reorg_depth=%d (head=%d, oldest_stored=%d)", i.reorgDepth, newHead.Number, recent[0].Number)
+	}
+
+	mostRecent := recent[0]
+	if mostRecent.Number > ancestor.Number {
+		rewindTarget := ancestor.Number + 1
+		if err := i.store.RewindTo(ctx, rewindTarget); err != nil {
+			return 0, 0, fmt.Errorf("rewind to %d: %w", rewindTarget, err)
+		}
+		cursorHint = rewindTarget
+		i.log.Warn("reorg detected", "ancestor", ancestor.Number, "rewind_to", rewindTarget, "orphaned_blocks", mostRecent.Number-ancestor.Number)
+	}
+
+	for _, h := range walked {
+		if err := i.store.RecordBlockHash(ctx, h.Number, h.Hash, h.ParentHash, i.reorgDepth); err != nil {
+			return 0, 0, fmt.Errorf("record hash %d: %w", h.Number, err)
+		}
+	}
+	return newHead.Number, cursorHint, nil
+}
+
+// backfillBlockHashes seeds block_hashes with the last reorg_depth canonical
+// headers behind the current cursor, so the first reconcile after a cold
+// resume has something to anchor against. No-op when block_hashes already has
+// entries or when the indexer hasn't indexed anything yet (cursor == 0).
+func (i *Indexer) backfillBlockHashes(ctx context.Context, cursor uint64) error {
+	recent, err := i.store.RecentBlockHashes(ctx, 1)
+	if err != nil {
+		return fmt.Errorf("backfill: read recent: %w", err)
+	}
+	if len(recent) > 0 {
+		return nil
+	}
+	if cursor == 0 {
+		return nil
+	}
+
+	end := cursor - 1
+	var start uint64
+	if end >= i.reorgDepth {
+		start = end - i.reorgDepth + 1
+	}
+	for n := start; n <= end; n++ {
+		h, err := i.rpc.BlockByNumber(ctx, rpc.HexUint64(n))
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			i.log.Warn("backfill block_hashes failed; reorg detection will warm up over time", "block", n, "err", err)
+			return nil
+		}
+		if err := i.store.RecordBlockHash(ctx, h.Number, h.Hash, h.ParentHash, i.reorgDepth); err != nil {
+			return fmt.Errorf("backfill: record hash %d: %w", n, err)
+		}
+	}
+	i.log.Info("block_hashes backfilled for reorg detection", "from", start, "to", end, "count", end-start+1)
+	return nil
 }
 
 type chunkRange struct {

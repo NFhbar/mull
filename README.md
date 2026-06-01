@@ -41,10 +41,25 @@ rpc_retry_max_attempts: 5 # total attempts (including the original call)
 # Optional — bounded worker pool for catch-up. Default 1 preserves sequential
 # behaviour; 4 is a sane shared-RPC default; ceiling is 8.
 concurrency: 1
+
+# Optional — reorg detection horizon. The indexer keeps the last `reorg_depth`
+# canonical block headers and walks parent-hash on each head reconcile to
+# detect divergence. Once the cursor is within `reorg_depth` of head, a reorg
+# shallower than this value is detected and rewound automatically. A reorg
+# deeper than `reorg_depth` (detected when the cursor is within `reorg_depth`
+# of head but the parent-hash walk can't find a common ancestor in that many
+# steps) is logged and the indexer exits — raise this value and restart if you
+# observe one. If the indexer was offline long enough that head outruns the
+# stored block hashes by more than `reorg_depth`, the indexer silently
+# re-anchors on the canonical head (logged as `re-anchoring on head`) —
+# events indexed prior to the offline window are trusted; raise `reorg_depth`
+# proportional to your expected downtime to keep this window narrow.
+reorg_depth: 64
 ```
 
-`chunk_size`, `poll_interval`, the `rpc_retry_*` keys, and `concurrency`
-have defaults (1000, 5s, 500ms, 30s, 5, 1). The rest are required.
+`chunk_size`, `poll_interval`, the `rpc_retry_*` keys, `concurrency`, and
+`reorg_depth` have defaults (1000, 5s, 500ms, 30s, 5, 1, 64). The rest are
+required.
 
 `concurrency` interacts with the `rpc_retry_*` knobs: higher concurrency
 multiplies the number of in-flight `eth_getLogs` calls hitting the RPC at
