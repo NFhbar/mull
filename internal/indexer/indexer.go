@@ -44,6 +44,10 @@ type Indexer struct {
 	// wildcardSinks receive every event (used by sinks that return an empty
 	// Topic0(), e.g. test fakes that want to observe everything).
 	wildcardSinks []store.EventSink
+	// allSinks preserves opts.Sinks in registration order. rewindSinks walks
+	// this so partial-failure residue is deterministic across runs — map
+	// iteration over sinksByTopic0 is not.
+	allSinks []store.EventSink
 }
 
 func New(client rpc.Client, st store.Store, opts Options) *Indexer {
@@ -61,6 +65,8 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 	}
 	sinksByTopic0 := make(map[string][]store.EventSink)
 	var wildcardSinks []store.EventSink
+	allSinks := make([]store.EventSink, len(opts.Sinks))
+	copy(allSinks, opts.Sinks)
 	for _, s := range opts.Sinks {
 		t := s.Topic0()
 		if t == "" {
@@ -83,6 +89,7 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 		log:           logger.With("contract", opts.Contract),
 		sinksByTopic0: sinksByTopic0,
 		wildcardSinks: wildcardSinks,
+		allSinks:      allSinks,
 	}
 }
 
@@ -222,11 +229,16 @@ func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint ui
 	mostRecent := recent[0]
 	if mostRecent.Number > ancestor.Number {
 		rewindTarget := ancestor.Number + 1
-		if err := i.store.RewindTo(ctx, rewindTarget); err != nil {
-			return 0, 0, fmt.Errorf("rewind to %d: %w", rewindTarget, err)
-		}
+		// rewindSinks runs before store.RewindTo so a sink failure leaves the
+		// store untouched; the next reconcileHead re-detects the same reorg
+		// and retries the whole rewind from scratch. Generated sink rewinds
+		// are `DELETE FROM <table> WHERE block_number >= ?` — idempotent, so
+		// partial progress on the retry is safe.
 		if err := i.rewindSinks(ctx, rewindTarget); err != nil {
 			return 0, 0, err
+		}
+		if err := i.store.RewindTo(ctx, rewindTarget); err != nil {
+			return 0, 0, fmt.Errorf("rewind to %d: %w", rewindTarget, err)
 		}
 		cursorHint = rewindTarget
 		i.log.Warn("reorg detected", "ancestor", ancestor.Number, "rewind_to", rewindTarget, "orphaned_blocks", mostRecent.Number-ancestor.Number)
@@ -402,20 +414,13 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 }
 
 // rewindSinks fans a rewind through every registered sink so each generated
-// typed table drops orphaned rows from blocks ≥ block. Without this the typed
-// tables hold rows for txs from the abandoned fork after store.RewindTo
-// cleared the raw events table, leaving SELECTs returning a union of forks.
+// typed table drops orphaned rows from blocks ≥ block. Iterates allSinks
+// (registration order) rather than sinksByTopic0 (a Go map) so the on-disk
+// residue from a partial-failure mid-fanout is deterministic across runs.
 func (i *Indexer) rewindSinks(ctx context.Context, block uint64) error {
-	for _, sink := range i.wildcardSinks {
+	for _, sink := range i.allSinks {
 		if err := sink.RewindTo(ctx, block); err != nil {
 			return fmt.Errorf("sink %s rewind: %w", sink.SinkID(), err)
-		}
-	}
-	for _, bucket := range i.sinksByTopic0 {
-		for _, sink := range bucket {
-			if err := sink.RewindTo(ctx, block); err != nil {
-				return fmt.Errorf("sink %s rewind: %w", sink.SinkID(), err)
-			}
 		}
 	}
 	return nil

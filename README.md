@@ -44,16 +44,32 @@ package at build time. Workflow:
 
 ```sh
 ./mull codegen --config mull.yaml --out internal/gen
+./mull codegen --config mull.yaml --out internal/gen --alias myproject
 ```
 
 `--out` defaults to `internal/gen`, resolved against the current working
 directory.
+
+`--alias` namespaces the generated SQL tables — `events_<alias>_<event>`.
+Defaults to the ABI filename stem (`abi/foo.json` → `events_foo_<event>`).
+Override when ingesting multiple contracts that share an event name, e.g.
+two ERC-20s would both emit `events_<alias>_transfer` and collide without
+distinct aliases.
 
 **Caveats:**
 
 - *v1 type coverage* — `address`, `bool`, `uintN/intN` (N ≤ 256), `bytes`,
   `bytesN` (1..32), `string`. Tuples and arrays are not yet supported;
   ABIs containing unsupported types fail at codegen with a clear error.
+- *Schema regeneration* — `ApplySchema` runs `CREATE TABLE IF NOT EXISTS`
+  on every `mull index` startup, which is correct for first-run and for
+  *adding* new event tables to an existing deployment. It silently no-ops
+  on shape changes, so if you regenerate an event with a different field
+  set (e.g. ABI gains an indexed `nonce` arg) the typed table on disk
+  keeps the old columns and the next matching event aborts the indexer
+  with `no such column: <name>`. mull has no migration tool by design;
+  drop or migrate the affected `events_<alias>_<event>` table manually
+  before resuming, then `mull index` rebuilds it via codegen-emitted DDL.
 - *Atomicity* — the committer goroutine writes raw events, runs each sink,
   then advances the checkpoint in separate transactions. If `mull index`
   crashes mid-chunk, the raw `events` row, the per-event typed rows, and

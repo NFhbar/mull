@@ -636,6 +636,17 @@ func TestReconcileHeadSinkRewindErrorPropagates(t *testing.T) {
 	if !errors.Is(err, sinkErr) {
 		t.Fatalf("err = %v, want wrap of %v", err, sinkErr)
 	}
+	// Post-error invariant: rewindSinks runs before store.RewindTo, so a sink
+	// failure must leave the store untouched. The next reconcileHead will
+	// re-detect the same reorg and retry the whole rewind from scratch.
+	if len(st.rewindToCalls) != 0 {
+		t.Fatalf("store.RewindTo called despite sink rewind failure: %v", st.rewindToCalls)
+	}
+	for n := uint64(10); n <= 12; n++ {
+		if _, ok := st.blockHashes[n]; !ok {
+			t.Fatalf("block_hashes[%d] missing — store mutated despite sink rewind failure", n)
+		}
+	}
 }
 
 func TestReconcileHeadAbortsWhenDeeperThanDepth(t *testing.T) {
