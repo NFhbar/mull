@@ -39,8 +39,16 @@ type Store interface {
 // by using INSERT OR IGNORE on (tx_hash, log_index); the indexer's
 // raw-events save, sink fan-out, and checkpoint advance run in
 // separate transactions, so a mid-chunk crash can replay any sink.
+//
+// RewindTo mirrors Store.RewindTo for each sink's own table — the
+// indexer fans the rewind through every sink on reorg so typed
+// tables stay consistent with the raw events table. Without this
+// hook, orphaned rows on the abandoned fork would linger and
+// SELECTs would return a union of forks (see reorg path in
+// Indexer.reconcileHead).
 type EventSink interface {
 	SinkID() string
 	Topic0() string
 	Handle(ctx context.Context, e Event) error
+	RewindTo(ctx context.Context, block uint64) error
 }

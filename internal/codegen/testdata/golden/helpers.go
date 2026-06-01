@@ -48,3 +48,19 @@ func decodeBoolTopic(topic string) bool {
 	}
 	return false
 }
+
+// decodeFixedBytesTopic returns a byte slice of length at least n decoded from
+// the topic, zero-padding the tail when common.FromHex yields a short slice
+// (malformed hex, odd length, etc.). The caller converts to [N]byte; without
+// this guard, [N]byte(common.FromHex(badTopic)) would panic and abort the
+// indexer goroutine instead of producing a recoverable zero value — matching
+// the silent-zero behavior of the sibling helpers.
+func decodeFixedBytesTopic(topic string, n int) []byte {
+	b := common.FromHex(topic)
+	if len(b) >= n {
+		return b
+	}
+	out := make([]byte, n)
+	copy(out, b)
+	return out
+}

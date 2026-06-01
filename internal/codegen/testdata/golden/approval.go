@@ -89,3 +89,8 @@ func (s *approvalSink) Handle(ctx context.Context, e store.Event) error {
 	)
 	return err
 }
+
+func (s *approvalSink) RewindTo(ctx context.Context, block uint64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM events_erc20_approval WHERE block_number >= ?`, block)
+	return err
+}

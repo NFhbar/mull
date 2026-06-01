@@ -3,6 +3,8 @@ package codegen
 import (
 	"bytes"
 	"flag"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -115,8 +117,11 @@ func TestGenerate_RejectsTupleType(t *testing.T) {
 }
 
 // TestGenerate_IndexedBytesN_NoMissingHelper verifies that an indexed bytesN
-// arg compiles without referencing a nonexistent decodeBytesNTopic helper —
-// the topic expression is inlined as `[N]byte(common.FromHex(...))` instead.
+// arg generates syntactically valid Go that doesn't reference the missing
+// decodeBytesNTopic family (regression for the Pass 2 bug where the emitted
+// helper name had no matching definition). The parser walk catches the broad
+// shape of that failure — emission referencing an undeclared function still
+// parses, but the file as a whole must at least be syntactically valid Go.
 func TestGenerate_IndexedBytesN_NoMissingHelper(t *testing.T) {
 	abiJSON := `[
 		{
@@ -138,16 +143,39 @@ func TestGenerate_IndexedBytesN_NoMissingHelper(t *testing.T) {
 	if _, err := Generate(GenerateConfig{AbiPath: abiPath, OutDir: outDir}); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	got, err := os.ReadFile(filepath.Join(outDir, "pinged.go"))
+	for _, name := range []string{"pinged.go", "helpers.go"} {
+		path := filepath.Join(outDir, name)
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if _, err := parser.ParseFile(token.NewFileSet(), path, got, parser.AllErrors); err != nil {
+			t.Fatalf("%s does not parse: %v\n---src---\n%s", name, err, got)
+		}
+	}
+	pinged, err := os.ReadFile(filepath.Join(outDir, "pinged.go"))
 	if err != nil {
 		t.Fatalf("read pinged.go: %v", err)
 	}
-	src := string(got)
-	if strings.Contains(src, "decodeBytes") {
-		t.Fatalf("generated pinged.go references missing decodeBytes* helper:\n%s", src)
+	helpers, err := os.ReadFile(filepath.Join(outDir, "helpers.go"))
+	if err != nil {
+		t.Fatalf("read helpers.go: %v", err)
 	}
-	if !strings.Contains(src, "[32]byte(common.FromHex(log.Topics[1]))") {
-		t.Fatalf("generated pinged.go missing inline [32]byte conversion:\n%s", src)
+	// Pass 2 bug shape: the emitter referenced a helper named decodeBytesNTopic
+	// (or any decodeBytes<digits>Topic flavor) that helpersTemplate did not
+	// define. Guard against regressions in that specific shape.
+	for _, name := range []string{"decodeBytes32Topic", "decodeBytesNTopic"} {
+		if bytes.Contains(pinged, []byte(name)) {
+			t.Fatalf("generated pinged.go references missing helper %q:\n%s", name, pinged)
+		}
+	}
+	// The current emission must use decodeFixedBytesTopic (defined in
+	// helpersTemplate) — assert both the use site and the definition.
+	if !bytes.Contains(pinged, []byte("decodeFixedBytesTopic(log.Topics[1], 32)")) {
+		t.Fatalf("generated pinged.go missing expected decodeFixedBytesTopic call:\n%s", pinged)
+	}
+	if !bytes.Contains(helpers, []byte("func decodeFixedBytesTopic(")) {
+		t.Fatalf("generated helpers.go missing decodeFixedBytesTopic definition:\n%s", helpers)
 	}
 }
 

@@ -551,6 +551,93 @@ func TestReconcileHeadDetectsAndRewindsShallowReorg(t *testing.T) {
 	}
 }
 
+func TestReconcileHeadFansRewindToSinks(t *testing.T) {
+	st := &fakeStore{
+		blockHashes: map[uint64]store.BlockHashEntry{
+			10: {Number: 10, Hash: "0xA10", ParentHash: "0xA9"},
+			11: {Number: 11, Hash: "0xA11", ParentHash: "0xA10"},
+			12: {Number: 12, Hash: "0xA12", ParentHash: "0xA11"},
+		},
+	}
+	// Chain B diverges at block 12 (ancestor is block 11 → rewind target 12).
+	r := &fakeRPC{
+		head: 12,
+		headers: map[uint64]rpc.Header{
+			12: {Number: 12, Hash: "0xB12", ParentHash: "0xA11"},
+		},
+		headerByHash: map[string]rpc.Header{
+			"0xA11": {Number: 11, Hash: "0xA11", ParentHash: "0xA10"},
+		},
+	}
+	topicSig := "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+	typedSink := &fakeSink{id: "typed", topic0: topicSig}
+	wildcardSink := &fakeSink{id: "wildcard"}
+	idx := New(r, st, Options{
+		Contract:    "0xc",
+		ChunkSize:   10,
+		Concurrency: 1,
+		ReorgDepth:  4,
+		Logger:      quietLogger(),
+		Sinks:       []store.EventSink{typedSink, wildcardSink},
+	})
+
+	_, hint, err := idx.reconcileHead(context.Background())
+	if err != nil {
+		t.Fatalf("reconcileHead: %v", err)
+	}
+	if hint != 12 {
+		t.Fatalf("hint = %d, want 12", hint)
+	}
+	if len(st.rewindToCalls) != 1 || st.rewindToCalls[0] != 12 {
+		t.Fatalf("store rewinds = %v, want [12]", st.rewindToCalls)
+	}
+	for _, s := range []*fakeSink{typedSink, wildcardSink} {
+		s.mu.Lock()
+		got := append([]uint64(nil), s.rewinds...)
+		s.mu.Unlock()
+		if len(got) != 1 || got[0] != 12 {
+			t.Fatalf("sink %s rewinds = %v, want [12]", s.id, got)
+		}
+	}
+}
+
+func TestReconcileHeadSinkRewindErrorPropagates(t *testing.T) {
+	st := &fakeStore{
+		blockHashes: map[uint64]store.BlockHashEntry{
+			10: {Number: 10, Hash: "0xA10", ParentHash: "0xA9"},
+			11: {Number: 11, Hash: "0xA11", ParentHash: "0xA10"},
+			12: {Number: 12, Hash: "0xA12", ParentHash: "0xA11"},
+		},
+	}
+	r := &fakeRPC{
+		head: 12,
+		headers: map[uint64]rpc.Header{
+			12: {Number: 12, Hash: "0xB12", ParentHash: "0xA11"},
+		},
+		headerByHash: map[string]rpc.Header{
+			"0xA11": {Number: 11, Hash: "0xA11", ParentHash: "0xA10"},
+		},
+	}
+	sinkErr := errors.New("typed table locked")
+	sink := &fakeSink{id: "broken", rewindErr: sinkErr}
+	idx := New(r, st, Options{
+		Contract:    "0xc",
+		ChunkSize:   10,
+		Concurrency: 1,
+		ReorgDepth:  4,
+		Logger:      quietLogger(),
+		Sinks:       []store.EventSink{sink},
+	})
+
+	_, _, err := idx.reconcileHead(context.Background())
+	if err == nil {
+		t.Fatal("expected error from sink rewind, got nil")
+	}
+	if !errors.Is(err, sinkErr) {
+		t.Fatalf("err = %v, want wrap of %v", err, sinkErr)
+	}
+}
+
 func TestReconcileHeadAbortsWhenDeeperThanDepth(t *testing.T) {
 	st := &fakeStore{
 		blockHashes: map[uint64]store.BlockHashEntry{
@@ -829,12 +916,14 @@ func TestBackfillBlockHashesSwallowsMidWalkRPCError(t *testing.T) {
 }
 
 type fakeSink struct {
-	id      string
-	topic0  string
-	mu      sync.Mutex
-	handled []store.Event
-	failOn  string
-	failErr error
+	id          string
+	topic0      string
+	mu          sync.Mutex
+	handled     []store.Event
+	rewinds     []uint64
+	rewindErr   error
+	failOn      string
+	failErr     error
 }
 
 func (s *fakeSink) SinkID() string { return s.id }
@@ -846,6 +935,15 @@ func (s *fakeSink) Handle(_ context.Context, e store.Event) error {
 		return s.failErr
 	}
 	s.handled = append(s.handled, e)
+	return nil
+}
+func (s *fakeSink) RewindTo(_ context.Context, block uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rewindErr != nil {
+		return s.rewindErr
+	}
+	s.rewinds = append(s.rewinds, block)
 	return nil
 }
 

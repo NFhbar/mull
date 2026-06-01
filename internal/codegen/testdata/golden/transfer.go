@@ -89,3 +89,8 @@ func (s *transferSink) Handle(ctx context.Context, e store.Event) error {
 	)
 	return err
 }
+
+func (s *transferSink) RewindTo(ctx context.Context, block uint64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM events_erc20_transfer WHERE block_number >= ?`, block)
+	return err
+}

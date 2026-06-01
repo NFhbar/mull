@@ -225,6 +225,9 @@ func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint ui
 		if err := i.store.RewindTo(ctx, rewindTarget); err != nil {
 			return 0, 0, fmt.Errorf("rewind to %d: %w", rewindTarget, err)
 		}
+		if err := i.rewindSinks(ctx, rewindTarget); err != nil {
+			return 0, 0, err
+		}
 		cursorHint = rewindTarget
 		i.log.Warn("reorg detected", "ancestor", ancestor.Number, "rewind_to", rewindTarget, "orphaned_blocks", mostRecent.Number-ancestor.Number)
 	}
@@ -396,6 +399,26 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 		return committed, err
 	}
 	return committed, nil
+}
+
+// rewindSinks fans a rewind through every registered sink so each generated
+// typed table drops orphaned rows from blocks ≥ block. Without this the typed
+// tables hold rows for txs from the abandoned fork after store.RewindTo
+// cleared the raw events table, leaving SELECTs returning a union of forks.
+func (i *Indexer) rewindSinks(ctx context.Context, block uint64) error {
+	for _, sink := range i.wildcardSinks {
+		if err := sink.RewindTo(ctx, block); err != nil {
+			return fmt.Errorf("sink %s rewind: %w", sink.SinkID(), err)
+		}
+	}
+	for _, bucket := range i.sinksByTopic0 {
+		for _, sink := range bucket {
+			if err := sink.RewindTo(ctx, block); err != nil {
+				return fmt.Errorf("sink %s rewind: %w", sink.SinkID(), err)
+			}
+		}
+	}
+	return nil
 }
 
 // dispatchSinks fans an event out to wildcard sinks (always) and the per-topic

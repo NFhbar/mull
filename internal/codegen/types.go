@@ -75,11 +75,12 @@ func mapType(t abi.Type) (typeMapping, error) {
 	case abi.FixedBytesTy:
 		// Indexed bytesN sits left-aligned in the 32-byte topic word; Go's
 		// slice-to-array conversion ([N]byte(slice)) takes the first N bytes.
-		// Avoids needing per-size decode helpers in helpersTemplate.
+		// decodeFixedBytesTopic guarantees a slice of at least N bytes so the
+		// conversion can never panic on a malformed RPC topic.
 		return typeMapping{
 			GoType:       fmt.Sprintf("[%d]byte", t.Size),
 			SQLType:      "TEXT",
-			TopicExpr:    fmt.Sprintf("[%d]byte(common.FromHex(%%s))", t.Size),
+			TopicExpr:    fmt.Sprintf("[%d]byte(decodeFixedBytesTopic(%%s, %d))", t.Size, t.Size),
 			IsFixedBytes: true,
 		}, nil
 	case abi.BytesTy:
