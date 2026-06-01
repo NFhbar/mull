@@ -76,11 +76,27 @@ func (i *Indexer) Run(ctx context.Context) error {
 	}
 	i.log.Info("indexer starting", "from_block", cursor)
 
-	if err := i.backfillBlockHashes(ctx, cursor); err != nil {
+	// Peek at head once so we can skip the backfill when the cursor is more
+	// than reorg_depth blocks behind: in that case the first reconcileHead
+	// will re-anchor on head and evict any backfilled entries via the cap,
+	// so the backfill's RPC calls would be wasted.
+	startHead, err := i.rpc.BlockByNumber(ctx, "latest")
+	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("fetch initial head: %w", err)
+	}
+	if startHead.Number <= cursor+i.reorgDepth {
+		if err := i.backfillBlockHashes(ctx, cursor); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+	} else {
+		i.log.Info("skipping block_hashes backfill — cursor more than reorg_depth behind head",
+			"cursor", cursor, "head", startHead.Number, "reorg_depth", i.reorgDepth)
 	}
 
 	ticker := time.NewTicker(i.pollInterval)
@@ -137,6 +153,17 @@ func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint ui
 		return newHead.Number, 0, nil
 	}
 
+	// Gap larger than reorg_depth: a parent-hash walk can't reach the stored
+	// range in i.reorgDepth steps, so reorg detection isn't meaningful here.
+	// Re-anchor on the canonical head and let catchUp resume; reorg detection
+	// re-arms once the cursor advances to within reorg_depth of the tip.
+	if newHead.Number > recent[0].Number+i.reorgDepth {
+		if err := i.store.RecordBlockHash(ctx, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
+			return 0, 0, fmt.Errorf("re-anchor head hash: %w", err)
+		}
+		return newHead.Number, 0, nil
+	}
+
 	walked := []rpc.Header{newHead}
 	cur := newHead
 	var ancestor *rpc.Header
@@ -176,7 +203,7 @@ func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint ui
 			return 0, 0, fmt.Errorf("rewind to %d: %w", rewindTarget, err)
 		}
 		cursorHint = rewindTarget
-		i.log.Warn("reorg detected", "ancestor", ancestor.Number, "rewind_to", rewindTarget, "depth", mostRecent.Number-ancestor.Number)
+		i.log.Warn("reorg detected", "ancestor", ancestor.Number, "rewind_to", rewindTarget, "orphaned_blocks", mostRecent.Number-ancestor.Number)
 	}
 
 	for _, h := range walked {
@@ -209,7 +236,7 @@ func (i *Indexer) backfillBlockHashes(ctx context.Context, cursor uint64) error 
 		start = end - i.reorgDepth + 1
 	}
 	for n := start; n <= end; n++ {
-		h, err := i.rpc.BlockByNumber(ctx, hexUint64(n))
+		h, err := i.rpc.BlockByNumber(ctx, rpc.HexUint64(n))
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
@@ -223,10 +250,6 @@ func (i *Indexer) backfillBlockHashes(ctx context.Context, cursor uint64) error 
 	}
 	i.log.Info("block_hashes backfilled for reorg detection", "from", start, "to", end, "count", end-start+1)
 	return nil
-}
-
-func hexUint64(n uint64) string {
-	return fmt.Sprintf("0x%x", n)
 }
 
 type chunkRange struct {

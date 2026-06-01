@@ -50,10 +50,10 @@ func (f *fakeRPC) BlockByNumber(_ context.Context, tag string) (rpc.Header, erro
 		if h, ok := f.headers[f.head]; ok {
 			return h, nil
 		}
-		return rpc.Header{Number: f.head, Hash: "0xh-" + hexUint64(f.head), ParentHash: "0xh-" + hexUint64(f.head-1)}, nil
+		return rpc.Header{Number: f.head, Hash: "0xh-" + rpc.HexUint64(f.head), ParentHash: "0xh-" + rpc.HexUint64(f.head-1)}, nil
 	}
-	var n uint64
-	if _, err := fmt.Sscanf(tag, "0x%x", &n); err != nil {
+	n, err := rpc.ParseHexUint64(tag)
+	if err != nil {
 		return rpc.Header{}, fmt.Errorf("bad tag %q", tag)
 	}
 	if h, ok := f.headers[n]; ok {
@@ -732,6 +732,99 @@ func TestBackfillBlockHashesOnColdResume(t *testing.T) {
 	}
 	if _, ok := st.blockHashes[136]; ok {
 		t.Fatalf("backfill went too deep — block 136 should not be present")
+	}
+}
+
+// TestRunMakesProgressWhenStartBlockFarBehindHead exercises the deep-gap
+// startup path end-to-end: cursor begins more than reorg_depth blocks behind
+// head, so backfill is skipped in Run and reconcileHead re-anchors on head
+// (covering both the cold-start branch via the first iteration AND the
+// warm-restart re-anchor branch via a pre-seeded stale entry). Run must make
+// forward progress, never error with "reorg deeper than reorg_depth".
+func TestRunMakesProgressWhenStartBlockFarBehindHead(t *testing.T) {
+	// Pre-seed a stale block_hashes entry to simulate a warm restart where
+	// the indexer was offline long enough for head to outrun reorg_depth.
+	// This forces reconcileHead into the new re-anchor branch (recent is
+	// non-empty but newHead.Number > recent[0].Number + reorg_depth).
+	st := &fakeStore{
+		checkpoint: 30,
+		blockHashes: map[uint64]store.BlockHashEntry{
+			29: {Number: 29, Hash: "0xH29", ParentHash: "0xH28"},
+		},
+	}
+	headers := map[uint64]rpc.Header{}
+	for n := uint64(0); n <= 200; n++ {
+		headers[n] = rpc.Header{Number: n, Hash: fmt.Sprintf("0xH%d", n), ParentHash: fmt.Sprintf("0xH%d", n-1)}
+	}
+	r := &fakeRPC{
+		head:    200,
+		headers: headers,
+		logsFor: func(from, to uint64) []rpc.Log {
+			return []rpc.Log{{BlockNumber: from, TxHash: fmt.Sprintf("0xtx-%d", from), LogIndex: 0}}
+		},
+	}
+	idx := New(r, st, Options{
+		Contract:     "0xc",
+		ChunkSize:    50,
+		StartBlock:   10,
+		PollInterval: 5 * time.Millisecond,
+		ReorgDepth:   16,
+		Logger:       quietLogger(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- idx.Run(ctx) }()
+
+	// Forward progress = checkpoint advances past the starting cursor (30).
+	// If reconcileHead aborts with "reorg deeper than reorg_depth", Run
+	// returns immediately and checkpoint stays at 30.
+	progressed := waitFor(func() bool {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return st.checkpoint > 30
+	}, 2*time.Second)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !progressed {
+		t.Fatalf("checkpoint did not advance past 30 (checkpoint=%d) — Run aborted on deep gap", st.checkpoint)
+	}
+}
+
+// TestBackfillBlockHashesSwallowsMidWalkRPCError covers the
+// `log.Warn(...); return nil` path in backfillBlockHashes: when an
+// intermediate BlockByNumber call fails, backfill records what it has so far
+// and returns nil rather than propagating. Reorg detection then warms up
+// once the indexer catches up to within reorg_depth of head.
+func TestBackfillBlockHashesSwallowsMidWalkRPCError(t *testing.T) {
+	st := &fakeStore{}
+	headers := map[uint64]rpc.Header{}
+	// Walk for cursor=100 covers 92..99. Populate 92..98 so they record
+	// successfully; leave 99 missing so the fakeRPC returns "block not found"
+	// — the error backfill must swallow.
+	for n := uint64(92); n <= 98; n++ {
+		headers[n] = rpc.Header{Number: n, Hash: fmt.Sprintf("0xH%d", n), ParentHash: fmt.Sprintf("0xH%d", n-1)}
+	}
+	r := &fakeRPC{head: 100, headers: headers}
+
+	idx := New(r, st, Options{
+		Contract:   "0xc",
+		ReorgDepth: 8,
+		Logger:     quietLogger(),
+	})
+
+	if err := idx.backfillBlockHashes(context.Background(), 100); err != nil {
+		t.Fatalf("backfill must swallow mid-walk error, got: %v", err)
+	}
+	for n := uint64(92); n <= 98; n++ {
+		if _, ok := st.blockHashes[n]; !ok {
+			t.Fatalf("expected backfilled hash at block %d before the failure", n)
+		}
+	}
+	if _, ok := st.blockHashes[99]; ok {
+		t.Fatalf("block 99 lookup failed — should not have been recorded")
 	}
 }
 
