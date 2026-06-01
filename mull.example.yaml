@@ -18,3 +18,11 @@ rpc_retry_max_attempts: 5      # (optional)
 # increase pressure on the RPC — rely on the rpc_retry_* knobs above to
 # absorb 429s on rate-limited endpoints.
 concurrency: 1                 # (optional, 1..8)
+
+# Reorg detection horizon. The indexer keeps the last `reorg_depth` block
+# headers and walks parent-hash on each head reconcile to detect divergence.
+# If a reorg deeper than `reorg_depth` is observed, the indexer exits with a
+# non-zero status; raise this value and restart. On cold resume the indexer
+# back-fills `reorg_depth` recent block headers from the RPC before entering
+# the poll loop, so detection is armed immediately.
+reorg_depth: 64                # (optional, 1..1024)

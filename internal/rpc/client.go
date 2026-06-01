@@ -21,9 +21,17 @@ type Log struct {
 	Data        string
 }
 
+type Header struct {
+	Number     uint64
+	Hash       string
+	ParentHash string
+}
+
 type Client interface {
 	BlockNumber(ctx context.Context) (uint64, error)
 	GetLogs(ctx context.Context, from, to uint64, address string, topics []string) ([]Log, error)
+	BlockByNumber(ctx context.Context, tag string) (Header, error)
+	BlockByHash(ctx context.Context, hash string) (Header, error)
 }
 
 type HTTPClient struct {
@@ -134,6 +142,42 @@ func (c *HTTPClient) BlockNumber(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return parseHexUint64(hex)
+}
+
+type rawBlockHeader struct {
+	Number     string `json:"number"`
+	Hash       string `json:"hash"`
+	ParentHash string `json:"parentHash"`
+}
+
+func decodeHeader(raw *rawBlockHeader) (Header, error) {
+	n, err := parseHexUint64(raw.Number)
+	if err != nil {
+		return Header{}, fmt.Errorf("parse block number %q: %w", raw.Number, err)
+	}
+	return Header{Number: n, Hash: raw.Hash, ParentHash: raw.ParentHash}, nil
+}
+
+func (c *HTTPClient) BlockByNumber(ctx context.Context, tag string) (Header, error) {
+	var raw *rawBlockHeader
+	if err := c.call(ctx, "eth_getBlockByNumber", []any{tag, false}, &raw); err != nil {
+		return Header{}, err
+	}
+	if raw == nil {
+		return Header{}, fmt.Errorf("block not found: %s", tag)
+	}
+	return decodeHeader(raw)
+}
+
+func (c *HTTPClient) BlockByHash(ctx context.Context, hash string) (Header, error) {
+	var raw *rawBlockHeader
+	if err := c.call(ctx, "eth_getBlockByHash", []any{hash, false}, &raw); err != nil {
+		return Header{}, err
+	}
+	if raw == nil {
+		return Header{}, fmt.Errorf("block not found: %s", hash)
+	}
+	return decodeHeader(raw)
 }
 
 type logFilter struct {

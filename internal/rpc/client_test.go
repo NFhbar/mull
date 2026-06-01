@@ -87,6 +87,74 @@ func TestGetLogsDecodesHexFields(t *testing.T) {
 	}
 }
 
+func TestBlockByNumberDecodesHeader(t *testing.T) {
+	srv := newTestServer(t, func(method string, params json.RawMessage) (any, *rpcError) {
+		if method != "eth_getBlockByNumber" {
+			t.Errorf("method = %q, want eth_getBlockByNumber", method)
+		}
+		if !strings.Contains(string(params), `"latest"`) {
+			t.Errorf("params missing tag: %s", params)
+		}
+		if !strings.Contains(string(params), `false`) {
+			t.Errorf("params missing false (header-only): %s", params)
+		}
+		return map[string]any{
+			"number":     "0x2a",
+			"hash":       "0xabc",
+			"parentHash": "0xdef",
+		}, nil
+	})
+	c := NewHTTPClient(srv.URL, nil, RetryPolicy{})
+	h, err := c.BlockByNumber(context.Background(), "latest")
+	if err != nil {
+		t.Fatalf("BlockByNumber: %v", err)
+	}
+	if h.Number != 42 || h.Hash != "0xabc" || h.ParentHash != "0xdef" {
+		t.Fatalf("header = %+v, want {42, 0xabc, 0xdef}", h)
+	}
+}
+
+func TestBlockByHashDecodesHeader(t *testing.T) {
+	srv := newTestServer(t, func(method string, params json.RawMessage) (any, *rpcError) {
+		if method != "eth_getBlockByHash" {
+			t.Errorf("method = %q, want eth_getBlockByHash", method)
+		}
+		if !strings.Contains(string(params), `"0xabc"`) {
+			t.Errorf("params missing hash: %s", params)
+		}
+		return map[string]any{
+			"number":     "0x10",
+			"hash":       "0xabc",
+			"parentHash": "0xparent",
+		}, nil
+	})
+	c := NewHTTPClient(srv.URL, nil, RetryPolicy{})
+	h, err := c.BlockByHash(context.Background(), "0xabc")
+	if err != nil {
+		t.Fatalf("BlockByHash: %v", err)
+	}
+	if h.Number != 16 || h.Hash != "0xabc" || h.ParentHash != "0xparent" {
+		t.Fatalf("header = %+v, want {16, 0xabc, 0xparent}", h)
+	}
+}
+
+func TestBlockByHashNullResult(t *testing.T) {
+	srv := newTestServer(t, func(method string, params json.RawMessage) (any, *rpcError) {
+		return nil, nil
+	})
+	c := NewHTTPClient(srv.URL, nil, RetryPolicy{})
+	_, err := c.BlockByHash(context.Background(), "0xdeadbeef")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "block not found") {
+		t.Fatalf("err = %v, want 'block not found'", err)
+	}
+	if !strings.Contains(err.Error(), "0xdeadbeef") {
+		t.Fatalf("err = %v, want hash in message", err)
+	}
+}
+
 func TestRPCError(t *testing.T) {
 	srv := newTestServer(t, func(string, json.RawMessage) (any, *rpcError) {
 		return nil, &rpcError{Code: -32000, Message: "boom"}
