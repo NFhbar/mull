@@ -11,6 +11,7 @@ require (
 )
 
 require (
+	github.com/coder/websocket v1.8.13 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
