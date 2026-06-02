@@ -3,6 +3,7 @@ module github.com/NFhbar/mull
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.13
 	github.com/ethereum/go-ethereum v1.14.13
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.20.0
@@ -11,7 +12,6 @@ require (
 )
 
 require (
-	github.com/coder/websocket v1.8.13 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
