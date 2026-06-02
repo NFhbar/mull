@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -14,189 +12,6 @@ import (
 	"github.com/NFhbar/mull/internal/rpc"
 	"github.com/NFhbar/mull/internal/store"
 )
-
-type fakeRPC struct {
-	mu           sync.Mutex
-	head         uint64
-	logsFor      func(from, to uint64) []rpc.Log
-	headers      map[uint64]rpc.Header
-	headerByHash map[string]rpc.Header
-	headHash     string
-}
-
-func (f *fakeRPC) BlockNumber(context.Context) (uint64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.head, nil
-}
-func (f *fakeRPC) GetLogs(_ context.Context, from, to uint64, _ string, _ []string) ([]rpc.Log, error) {
-	f.mu.Lock()
-	fn := f.logsFor
-	f.mu.Unlock()
-	if fn == nil {
-		return nil, nil
-	}
-	return fn(from, to), nil
-}
-func (f *fakeRPC) BlockByNumber(_ context.Context, tag string) (rpc.Header, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if tag == "latest" {
-		if f.headHash != "" {
-			if h, ok := f.headerByHash[f.headHash]; ok {
-				return h, nil
-			}
-		}
-		if h, ok := f.headers[f.head]; ok {
-			return h, nil
-		}
-		return rpc.Header{Number: f.head, Hash: "0xh-" + rpc.HexUint64(f.head), ParentHash: "0xh-" + rpc.HexUint64(f.head-1)}, nil
-	}
-	n, err := rpc.ParseHexUint64(tag)
-	if err != nil {
-		return rpc.Header{}, fmt.Errorf("bad tag %q", tag)
-	}
-	if h, ok := f.headers[n]; ok {
-		return h, nil
-	}
-	return rpc.Header{}, fmt.Errorf("block not found: %s", tag)
-}
-func (f *fakeRPC) BlockByHash(_ context.Context, hash string) (rpc.Header, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if h, ok := f.headerByHash[hash]; ok {
-		return h, nil
-	}
-	for _, h := range f.headers {
-		if h.Hash == hash {
-			return h, nil
-		}
-	}
-	return rpc.Header{}, fmt.Errorf("block not found: %s", hash)
-}
-
-type fakeStore struct {
-	mu            sync.Mutex
-	events        []store.Event
-	checkpoint    uint64
-	ranges        [][2]uint64
-	saveOrder     []uint64    // block_number of events[0] for each SaveEvents call
-	saveCh        chan uint64 // optional: signals on each SaveEvents call (tests that need synchronization)
-	blockHashes   map[uint64]store.BlockHashEntry
-	rewindToCalls []uint64
-}
-
-func (s *fakeStore) SaveEvents(_ context.Context, events []store.Event) error {
-	s.mu.Lock()
-	s.events = append(s.events, events...)
-	var first uint64
-	if len(events) > 0 {
-		first = events[0].BlockNumber
-		s.saveOrder = append(s.saveOrder, first)
-	}
-	ch := s.saveCh
-	s.mu.Unlock()
-	if ch != nil && len(events) > 0 {
-		ch <- first
-	}
-	return nil
-}
-func (s *fakeStore) Checkpoint(context.Context) (uint64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.checkpoint, nil
-}
-func (s *fakeStore) SetCheckpoint(_ context.Context, b uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.checkpoint = b
-	return nil
-}
-func (s *fakeStore) RecordBlockHash(_ context.Context, number uint64, hash, parentHash string, capDepth uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.blockHashes == nil {
-		s.blockHashes = make(map[uint64]store.BlockHashEntry)
-	}
-	s.blockHashes[number] = store.BlockHashEntry{Number: number, Hash: hash, ParentHash: parentHash}
-	if capDepth > 0 {
-		var maxN uint64
-		for n := range s.blockHashes {
-			if n > maxN {
-				maxN = n
-			}
-		}
-		if maxN >= capDepth {
-			cutoff := maxN - capDepth
-			for n := range s.blockHashes {
-				if n <= cutoff {
-					delete(s.blockHashes, n)
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func (s *fakeStore) RecentBlockHashes(_ context.Context, limit uint64) ([]store.BlockHashEntry, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	nums := make([]uint64, 0, len(s.blockHashes))
-	for n := range s.blockHashes {
-		nums = append(nums, n)
-	}
-	// Descending sort.
-	for i := 1; i < len(nums); i++ {
-		for j := i; j > 0 && nums[j-1] < nums[j]; j-- {
-			nums[j-1], nums[j] = nums[j], nums[j-1]
-		}
-	}
-	if uint64(len(nums)) > limit {
-		nums = nums[:limit]
-	}
-	out := make([]store.BlockHashEntry, 0, len(nums))
-	for _, n := range nums {
-		out = append(out, s.blockHashes[n])
-	}
-	return out, nil
-}
-
-func (s *fakeStore) BlockHashAt(_ context.Context, number uint64) (store.BlockHashEntry, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.blockHashes[number]
-	return e, ok, nil
-}
-
-func (s *fakeStore) RewindTo(_ context.Context, block uint64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.rewindToCalls = append(s.rewindToCalls, block)
-	kept := s.events[:0]
-	for _, e := range s.events {
-		if e.BlockNumber < block {
-			kept = append(kept, e)
-		}
-	}
-	s.events = kept
-	for n := range s.blockHashes {
-		if n >= block {
-			delete(s.blockHashes, n)
-		}
-	}
-	s.checkpoint = block
-	return nil
-}
-
-func (s *fakeStore) Query(context.Context, store.QueryFilter) ([]store.Event, *store.EventCursor, error) {
-	return nil, nil, nil
-}
-
-func (s *fakeStore) Close() error { return nil }
-
-func quietLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func TestCatchUpChunksAndCheckpoints(t *testing.T) {
 	st := &fakeStore{}
@@ -467,7 +282,7 @@ func TestReconcileHeadColdStart(t *testing.T) {
 	}
 	idx := newReorgIdx(t, r, st, 4)
 
-	head, hint, err := idx.reconcileHead(context.Background())
+	head, hint, err := callReconcileHead(t, idx, r)
 	if err != nil {
 		t.Fatalf("reconcileHead: %v", err)
 	}
@@ -494,7 +309,7 @@ func TestReconcileHeadContiguousExtension(t *testing.T) {
 	}
 	idx := newReorgIdx(t, r, st, 4)
 
-	head, hint, err := idx.reconcileHead(context.Background())
+	head, hint, err := callReconcileHead(t, idx, r)
 	if err != nil {
 		t.Fatalf("reconcileHead: %v", err)
 	}
@@ -534,7 +349,7 @@ func TestReconcileHeadDetectsAndRewindsShallowReorg(t *testing.T) {
 	}
 	idx := newReorgIdx(t, r, st, 16)
 
-	head, hint, err := idx.reconcileHead(context.Background())
+	head, hint, err := callReconcileHead(t, idx, r)
 	if err != nil {
 		t.Fatalf("reconcileHead: %v", err)
 	}
@@ -585,7 +400,7 @@ func TestReconcileHeadFansRewindToSinks(t *testing.T) {
 		Sinks:       []store.EventSink{typedSink, wildcardSink},
 	})
 
-	_, hint, err := idx.reconcileHead(context.Background())
+	_, hint, err := callReconcileHead(t, idx, r)
 	if err != nil {
 		t.Fatalf("reconcileHead: %v", err)
 	}
@@ -633,7 +448,7 @@ func TestReconcileHeadSinkRewindErrorPropagates(t *testing.T) {
 		Sinks:       []store.EventSink{sink},
 	})
 
-	_, _, err := idx.reconcileHead(context.Background())
+	_, _, err := callReconcileHead(t, idx, r)
 	if err == nil {
 		t.Fatal("expected error from sink rewind, got nil")
 	}
@@ -675,7 +490,7 @@ func TestReconcileHeadAbortsWhenDeeperThanDepth(t *testing.T) {
 	}
 	idx := newReorgIdx(t, r, st, 3)
 
-	_, _, err := idx.reconcileHead(context.Background())
+	_, _, err := callReconcileHead(t, idx, r)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1023,6 +838,57 @@ func TestRun_SinkErrorAbortsRun(t *testing.T) {
 	}
 	if !errors.Is(err, sinkErr) {
 		t.Fatalf("err = %v, want wrap of %v", err, sinkErr)
+	}
+}
+
+// stubHeadSource is a deterministic HeadSource for tests that need to drive
+// Run with a fixed set of heads and observe channel-close behaviour.
+type stubHeadSource struct {
+	latest rpc.Header
+	heads  []rpc.Header
+}
+
+func (s *stubHeadSource) Latest(context.Context) (rpc.Header, error) {
+	return s.latest, nil
+}
+
+func (s *stubHeadSource) Subscribe(context.Context) (<-chan rpc.Header, error) {
+	ch := make(chan rpc.Header, len(s.heads)+1)
+	for _, h := range s.heads {
+		ch <- h
+	}
+	close(ch)
+	return ch, nil
+}
+
+func TestRun_ExitsCleanlyOnHeadChannelClose(t *testing.T) {
+	st := &fakeStore{}
+	r := &fakeRPC{
+		head: 10,
+		headers: map[uint64]rpc.Header{
+			10: {Number: 10, Hash: "0xh10", ParentHash: "0xh9"},
+		},
+		logsFor: func(uint64, uint64) []rpc.Log { return nil },
+	}
+	src := &stubHeadSource{latest: rpc.Header{Number: 10, Hash: "0xh10", ParentHash: "0xh9"}}
+	idx := New(r, st, Options{
+		Contract:   "0xc",
+		ChunkSize:  100,
+		StartBlock: 0,
+		ReorgDepth: 4,
+		Logger:     quietLogger(),
+		HeadSource: src,
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- idx.Run(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after head channel closed")
 	}
 }
 
