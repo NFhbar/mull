@@ -25,7 +25,35 @@ type Store interface {
 	RecentBlockHashes(ctx context.Context, limit uint64) ([]BlockHashEntry, error)
 	BlockHashAt(ctx context.Context, number uint64) (BlockHashEntry, bool, error)
 	RewindTo(ctx context.Context, block uint64) error
+	Query(ctx context.Context, filter QueryFilter) ([]Event, *EventCursor, error)
 	Close() error
+}
+
+// EventCursor positions a Query strictly after (Block, LogIndex). It is the
+// opaque pagination handle exposed by Query: the second return value of a
+// previous page is the After of the next page.
+type EventCursor struct {
+	Block    uint64
+	LogIndex uint
+}
+
+// QueryFilter is the parameter object for Store.Query. All fields are
+// optional; nil/zero means "no filter on that dimension".
+//
+// Pointer fields on Topic0..Topic3 distinguish "absent" (nil) from
+// "explicitly the empty string" (&"") — rare in practice but well-defined.
+// FromBlock and ToBlock are inclusive bounds. Limit is clamped to [1, 1000]
+// by the impl; zero means "default" (100).
+type QueryFilter struct {
+	Contract  string
+	Topic0    *string
+	Topic1    *string
+	Topic2    *string
+	Topic3    *string
+	FromBlock *uint64
+	ToBlock   *uint64
+	Limit     int
+	After     *EventCursor
 }
 
 // EventSink is a typed-event consumer wired in by generated code.

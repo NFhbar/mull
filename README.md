@@ -206,15 +206,94 @@ For ERC-20 `Transfer(address,address,uint256)` the raw layout is:
 `topics[0]` = event signature hash, `topics[1]` / `topics[2]` =
 from/to addresses (32-byte left-padded), `data` = amount (raw uint256 hex).
 
+## Querying via `mull serve`
+
+`mull serve` exposes the indexed events table over a small read-only
+HTTP/JSON API for consumers that can't speak SQLite directly (frontends,
+bots, analytics pipelines). The server runs against the same SQLite db
+as `mull index`; WAL mode is enabled at open time so the two can run in
+the same process or as separate processes pointing at the same `db_path`.
+
+```sh
+./mull serve --config mull.yaml --addr :8080   # same machine as `mull index`
+```
+
+For a sidecar deployment, run a second `mull serve` process with the same
+`db_path` — WAL admits the concurrent reader without serializing it
+against the writer.
+
+### Routes
+
+```sh
+curl -s localhost:8080/healthz
+# {"status":"ok"}
+
+curl -s localhost:8080/checkpoint
+# {"checkpoint":19000500}
+
+curl -s 'localhost:8080/events?contract=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48&from=19000000&to=19000010&limit=50'
+# {"events":[{"block_number":...,"tx_hash":"0x...","log_index":0,"address":"0x...","topics":["0x..."],"data":"0x..."}, ...],"next_cursor":"<opaque>"}
+```
+
+### Query parameters (`/events`)
+
+| param | meaning |
+| --- | --- |
+| `contract` | event source address (exact match) |
+| `topic0`..`topic3` | indexed topic match by position |
+| `from` / `to` | inclusive block-number bounds |
+| `limit` | page size, clamped to `[1, 1000]`; default 100 |
+| `cursor` | pass back `next_cursor` from the previous response |
+
+The cursor is opaque (base64-encoded) — clients should pass it back
+verbatim and not parse it; the wire format may evolve.
+
+**Stop condition:** iterate until `next_cursor` is empty. Do *not* stop
+when a page returns fewer than `limit` rows — short pages are expected
+when `topic1`..`topic3` filters prune rows from the fetched window. A
+short page with a non-empty `next_cursor` means "this window had few
+matches; keep going" rather than "end of data".
+
+### Topic-filter decode rules
+
+- `?topic0=0xABC` → filter on that value.
+- `?topic0=` (param present, value empty) → filter on rows whose topic0
+  is literally the empty string. Rare but well-defined.
+- `?topic0` absent → no filter on topic0.
+
+In v1, `topic0` is pushed into SQL (using the existing
+`(block_number, log_index)` index for ordering); `topic1`..`topic3` are
+post-filtered in Go after the SQL scan. This is fine for the common
+case of "filter by event signature"; v2 may push higher topics into SQL
+once per-event typed tables (from codegen) become the primary read path.
+
+**Index coverage caveat:** the `topics` column is not separately
+indexed, so a query that filters on `topic0` alone (no `contract` and
+no block range) degrades to a full-table scan that LIKE-evaluates every
+row. For sustained use, pair `topic0` with either a `contract` or a
+bounded `from`/`to` so the existing `(block_number, log_index)` index
+can drive the scan. v2's per-event typed tables will obviate this.
+
+### Operational notes
+
+- **No auth, no rate-limit in v1.** Front `mull serve` with a reverse
+  proxy if exposing beyond localhost.
+- The server sets `ReadHeaderTimeout: 5s`, `WriteTimeout: 30s`, and
+  `IdleTimeout: 60s` on the underlying `http.Server` so a slow client
+  can't hold a connection indefinitely.
+- WAL mode produces sibling `<db>.db-wal` and `<db>.db-shm` files; the
+  repo's `.gitignore` already covers them.
+
 ## Architecture
 
 ```
-cmd/                   cobra commands (root, index) + logging setup
+cmd/                   cobra commands (root, index, serve) + logging setup
 internal/
   config/              YAML load + validate + defaults
   rpc/                 JSON-RPC client (eth_blockNumber, eth_getLogs)
   store/               Store interface + SQLite impl (modernc.org/sqlite, pure Go)
   indexer/             Poll loop, chunked catch-up, checkpoint advance
+  serve/               HTTP/JSON API over the events table
 ```
 
 The indexer is wired against `rpc.Client` and `store.Store` interfaces, so

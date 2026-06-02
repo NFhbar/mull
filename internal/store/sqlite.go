@@ -19,6 +19,19 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// WAL admits a concurrent reader (e.g. `mull serve`) alongside the
+	// indexer's writer without serializing them. PRAGMA returns the resulting
+	// journal mode; assert it equals "wal" so a silent fallback (e.g. on a
+	// read-only filesystem) surfaces as an error instead of slipping through.
+	var mode string
+	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable wal: %w", err)
+	}
+	if mode != "wal" {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable wal: journal_mode=%q after PRAGMA, want %q", mode, "wal")
+	}
 	s := &SQLite{db: db}
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
@@ -178,6 +191,155 @@ func (s *SQLite) RewindTo(ctx context.Context, block uint64) error {
 		return fmt.Errorf("rewind checkpoint: %w", err)
 	}
 	return tx.Commit()
+}
+
+// Query implements Store.Query against the events table.
+//
+// SQL pushdown covers Contract, FromBlock, ToBlock, Topic0, and cursor
+// position; higher topics (Topic1..Topic3) are post-filtered in Go because
+// the table stores topics as a comma-joined string and a position-aware LIKE
+// chain over multiple positions would be both fragile and expensive. v2 may
+// push these down once typed per-event tables are the primary read path.
+//
+// Cursor strategy: fetch limit+1 rows so the next cursor can be derived
+// without a second query. If the +1 row was returned, the next cursor points
+// at the last row of the limit-truncated result.
+func (s *SQLite) Query(ctx context.Context, filter QueryFilter) ([]Event, *EventCursor, error) {
+	const (
+		defaultLimit = 100
+		maxLimit     = 1000
+	)
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
+	var (
+		where []string
+		args  []any
+	)
+	if filter.Contract != "" {
+		where = append(where, "address = ?")
+		args = append(args, filter.Contract)
+	}
+	if filter.FromBlock != nil {
+		where = append(where, "block_number >= ?")
+		args = append(args, *filter.FromBlock)
+	}
+	if filter.ToBlock != nil {
+		where = append(where, "block_number <= ?")
+		args = append(args, *filter.ToBlock)
+	}
+	if filter.Topic0 != nil {
+		// topics is a comma-joined list; topic0 is the first element. Exact
+		// match when it's the only topic, prefix match (with comma) otherwise.
+		// Escape LIKE metachars in the user-supplied topic so e.g. ?topic0=%
+		// can't widen the prefix pattern into a match-everything wildcard.
+		where = append(where, `(topics = ? OR topics LIKE ? ESCAPE '\')`)
+		args = append(args, *filter.Topic0, escapeLikePattern(*filter.Topic0)+",%")
+	}
+	if filter.After != nil {
+		// Strictly after (block, log_index).
+		where = append(where, "(block_number > ? OR (block_number = ? AND log_index > ?))")
+		args = append(args, filter.After.Block, filter.After.Block, filter.After.LogIndex)
+	}
+
+	q := `SELECT block_number, tx_hash, log_index, address, topics, data FROM events`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY block_number ASC, log_index ASC LIMIT ?"
+	// Over-fetch by 1 so a fully-saturated raw fetch is a reliable "SQL has
+	// more downstream" signal even when the Go-side post-filter prunes rows.
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query events: %w", err)
+	}
+	defer rows.Close()
+
+	// Single-pass scan that decouples the cursor anchor from the post-filter:
+	// matches are accumulated into out (capped at limit); lastRaw tracks the
+	// last SQL-scanned (block, log_index) regardless of whether it survived
+	// the post-filter. Two distinct "more downstream" signals are handled
+	// inline:
+	//   1. matches saturate mid-scan (len(out) == limit and another match
+	//      arrives) — return immediately with cursor = last out entry so the
+	//      just-arrived match is the first hit of the next page.
+	//   2. SQL returned its full limit+1 raw rows but matches did NOT
+	//      saturate — cursor = lastRaw so the next page resumes past the
+	//      whole examined window; correct even when topic1..3 strip enough
+	//      rows that out is shorter than `limit`.
+	out := make([]Event, 0, limit)
+	rawCount := 0
+	var lastRaw EventCursor
+	for rows.Next() {
+		var (
+			e      Event
+			topics string
+		)
+		if err := rows.Scan(&e.BlockNumber, &e.TxHash, &e.LogIndex, &e.Address, &topics, &e.Data); err != nil {
+			return nil, nil, fmt.Errorf("scan event: %w", err)
+		}
+		rawCount++
+		lastRaw = EventCursor{Block: e.BlockNumber, LogIndex: e.LogIndex}
+		if topics != "" {
+			e.Topics = strings.Split(topics, ",")
+		}
+		if !matchesHigherTopics(e.Topics, filter) {
+			continue
+		}
+		if len(out) >= limit {
+			last := out[len(out)-1]
+			return out, &EventCursor{Block: last.BlockNumber, LogIndex: last.LogIndex}, nil
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate events: %w", err)
+	}
+
+	if rawCount > limit {
+		anchor := lastRaw
+		return out, &anchor, nil
+	}
+	return out, nil, nil
+}
+
+// escapeLikePattern prefixes the SQL LIKE metacharacters (%, _) and the
+// escape character itself with a backslash so the caller's input can't
+// accidentally widen a prefix match. Pair with `ESCAPE '\'` in the SQL.
+func escapeLikePattern(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\\' || r == '%' || r == '_' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func matchesHigherTopics(topics []string, f QueryFilter) bool {
+	for i, want := range []*string{f.Topic1, f.Topic2, f.Topic3} {
+		if want == nil {
+			continue
+		}
+		pos := i + 1
+		var got string
+		if pos < len(topics) {
+			got = topics[pos]
+		}
+		if got != *want {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *SQLite) Close() error {

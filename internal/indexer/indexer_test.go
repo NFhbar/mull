@@ -188,6 +188,10 @@ func (s *fakeStore) RewindTo(_ context.Context, block uint64) error {
 	return nil
 }
 
+func (s *fakeStore) Query(context.Context, store.QueryFilter) ([]store.Event, *store.EventCursor, error) {
+	return nil, nil, nil
+}
+
 func (s *fakeStore) Close() error { return nil }
 
 func quietLogger() *slog.Logger {
