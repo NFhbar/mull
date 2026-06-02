@@ -24,18 +24,27 @@ type Options struct {
 	ReorgDepth   uint64
 	Logger       *slog.Logger
 	Sinks        []store.EventSink
+	// HeadSource overrides how Run learns about new chain heads. When nil, New
+	// constructs a PollingHeadSource wrapping the supplied client + PollInterval
+	// — preserves today's behaviour for in-process callers that haven't
+	// migrated.
+	HeadSource HeadSource
 }
 
 type Indexer struct {
-	rpc          rpc.Client
-	store        store.Store
-	contract     string
-	topics       []string
-	chunkSize    uint64
+	rpc      rpc.Client
+	store    store.Store
+	contract string
+	topics   []string
+	chunkSize uint64
+	// TODO(head-source): consumed only by the default PollingHeadSource
+	// constructor — promote into PollingHeadSource and drop from Indexer
+	// once Options callers migrate.
 	pollInterval time.Duration
 	startBlock   uint64
 	concurrency  int
 	reorgDepth   uint64
+	head         HeadSource
 	log          *slog.Logger
 	// sinksByTopic0 dispatches events in O(1) by their first topic. Built once
 	// in New from opts.Sinks; the canonical key is common.HexToHash(topic0).Hex()
@@ -76,6 +85,10 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 		key := common.HexToHash(t).Hex()
 		sinksByTopic0[key] = append(sinksByTopic0[key], s)
 	}
+	head := opts.HeadSource
+	if head == nil {
+		head = &PollingHeadSource{Client: client, PollInterval: opts.PollInterval}
+	}
 	return &Indexer{
 		rpc:           client,
 		store:         st,
@@ -86,6 +99,7 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 		startBlock:    opts.StartBlock,
 		concurrency:   concurrency,
 		reorgDepth:    reorgDepth,
+		head:          head,
 		log:           logger.With("contract", opts.Contract),
 		sinksByTopic0: sinksByTopic0,
 		wildcardSinks: wildcardSinks,
@@ -93,8 +107,11 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 	}
 }
 
-// Run polls the chain head and indexes logs in chunked block ranges
-// until ctx is cancelled. The checkpoint is the next block to index.
+// Run drives the indexer until ctx is cancelled or the head source closes its
+// channel. Cold-start: peek at head via HeadSource.Latest to decide whether to
+// backfill block_hashes. Steady-state: each head delivered on the subscription
+// channel drives one reconcileHead+catchUp cycle. The checkpoint is the next
+// block to index.
 func (i *Indexer) Run(ctx context.Context) error {
 	cursor, err := i.store.Checkpoint(ctx)
 	if err != nil {
@@ -109,7 +126,7 @@ func (i *Indexer) Run(ctx context.Context) error {
 	// than reorg_depth blocks behind: in that case the first reconcileHead
 	// will re-anchor on head and evict any backfilled entries via the cap,
 	// so the backfill's RPC calls would be wasted.
-	startHead, err := i.rpc.BlockByNumber(ctx, "latest")
+	startHead, err := i.head.Latest(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
@@ -128,11 +145,13 @@ func (i *Indexer) Run(ctx context.Context) error {
 			"cursor", cursor, "head", startHead.Number, "reorg_depth", i.reorgDepth)
 	}
 
-	ticker := time.NewTicker(i.pollInterval)
-	defer ticker.Stop()
+	headCh, err := i.head.Subscribe(ctx)
+	if err != nil {
+		return fmt.Errorf("subscribe to head: %w", err)
+	}
 
-	for {
-		head, cursorHint, err := i.reconcileHead(ctx)
+	for newHead := range headCh {
+		head, cursorHint, err := i.reconcileHead(ctx, newHead)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
@@ -152,25 +171,16 @@ func (i *Indexer) Run(ctx context.Context) error {
 			}
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			i.log.Info("indexer stopping", "next_block", cursor)
-			return nil
-		case <-ticker.C:
-		}
 	}
+	i.log.Info("indexer stopping", "next_block", cursor)
+	return nil
 }
 
-// reconcileHead fetches the canonical head, walks back via parent-hash to find
-// a common ancestor with stored hashes, and rewinds the store on divergence.
+// reconcileHead walks back from the supplied head via parent-hash to find a
+// common ancestor with stored hashes, and rewinds the store on divergence.
 // cursorHint is non-zero only when a rewind occurred; the caller must replace
 // its in-memory cursor with cursorHint so catchUp re-fetches the rewound range.
-func (i *Indexer) reconcileHead(ctx context.Context) (head uint64, cursorHint uint64, err error) {
-	newHead, err := i.rpc.BlockByNumber(ctx, "latest")
-	if err != nil {
-		return 0, 0, fmt.Errorf("fetch head header: %w", err)
-	}
-
+func (i *Indexer) reconcileHead(ctx context.Context, newHead rpc.Header) (head uint64, cursorHint uint64, err error) {
 	recent, err := i.store.RecentBlockHashes(ctx, 1)
 	if err != nil {
 		return 0, 0, fmt.Errorf("read recent hashes: %w", err)

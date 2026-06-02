@@ -123,11 +123,33 @@ concurrency: 1
 # events indexed prior to the offline window are trusted; raise `reorg_depth`
 # proportional to your expected downtime to keep this window narrow.
 reorg_depth: 64
+
+# Optional — how the indexer learns about new chain heads.
+#   ws    eth_subscribe("newHeads") over WSS; requires ws_rpc_url
+#   poll  eth_getBlockByNumber("latest") on poll_interval (pre-WSS behaviour)
+#   auto  ws when ws_rpc_url is set, otherwise poll
+head_source: "auto"
+
+# Optional — WebSocket RPC endpoint. Providers that split HTTP/WS (Alchemy,
+# Quicknode, Infura, …) take a different hostname/path for WSS. When set,
+# must start with ws:// or wss://. `head_source: auto` keys off the presence
+# of this field — set it and you get WSS heads, leave it unset and you stay
+# on polling.
+ws_rpc_url: "wss://eth-mainnet.g.alchemy.com/v2/<key>"
+
+# Optional — window of uninterrupted WS failure after which the source
+# demotes to polling for the rest of the run. The timer resets on each
+# successfully delivered head, so brief upstream blips don't permanently
+# demote you to polling. Once demoted, only a restart returns the source
+# to WS. Minimum 1s.
+head_source_fallback_after: 30s
 ```
 
-`chunk_size`, `poll_interval`, the `rpc_retry_*` keys, `concurrency`, and
-`reorg_depth` have defaults (1000, 5s, 500ms, 30s, 5, 1, 64). The rest are
-required.
+`chunk_size`, `poll_interval`, the `rpc_retry_*` keys, `concurrency`,
+`reorg_depth`, `head_source`, and `head_source_fallback_after` have defaults
+(1000, 5s, 500ms, 30s, 5, 1, 64, "auto", 30s). `ws_rpc_url` is required only
+when `head_source: ws`; for `auto` it's optional (its presence flips behaviour
+to WSS). The rest are required.
 
 `concurrency` interacts with the `rpc_retry_*` knobs: higher concurrency
 multiplies the number of in-flight `eth_getLogs` calls hitting the RPC at

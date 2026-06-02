@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -55,11 +56,15 @@ func runIndex(ctx context.Context) error {
 	}
 	sinks := gen.NewSinks(st.DB())
 
-	idx := indexer.New(rpc.NewHTTPClient(cfg.RPCURL, nil, rpc.RetryPolicy{
+	httpClient := rpc.NewHTTPClient(cfg.RPCURL, nil, rpc.RetryPolicy{
 		Base:        cfg.RPCRetryBase,
 		MaxDelay:    cfg.RPCRetryMaxDelay,
 		MaxAttempts: cfg.RPCRetryMaxAttempts,
-	}), st, indexer.Options{
+	})
+
+	headSource := buildHeadSource(cfg, httpClient, logger)
+
+	idx := indexer.New(httpClient, st, indexer.Options{
 		Contract:     cfg.Contract,
 		Topics:       cfg.Topics,
 		ChunkSize:    cfg.ChunkSize,
@@ -69,6 +74,34 @@ func runIndex(ctx context.Context) error {
 		ReorgDepth:   cfg.ReorgDepth,
 		Logger:       logger,
 		Sinks:        sinks,
+		HeadSource:   headSource,
 	})
 	return idx.Run(ctx)
+}
+
+// buildHeadSource picks the HeadSource implementation per cfg.HeadSource:
+//   - "poll": polling only (the pre-WSS behaviour)
+//   - "ws":   WS source backed by the polling fallback for Latest + demotion
+//   - "auto": WS when ws_rpc_url is set, otherwise poll
+//
+// Validation in config.Load guarantees that "ws" implies WSRPCURL != "".
+func buildHeadSource(cfg *config.Config, client *rpc.HTTPClient, logger *slog.Logger) indexer.HeadSource {
+	polling := &indexer.PollingHeadSource{Client: client, PollInterval: cfg.PollInterval}
+	switch cfg.HeadSource {
+	case "poll":
+		return polling
+	case "ws":
+		return rpc.NewWebSocketHeadSource(cfg.WSRPCURL, polling, rpc.WSOptions{
+			FallbackAfter: cfg.HeadSourceFallbackAfter,
+			Logger:        logger,
+		})
+	default: // "auto"
+		if cfg.WSRPCURL == "" {
+			return polling
+		}
+		return rpc.NewWebSocketHeadSource(cfg.WSRPCURL, polling, rpc.WSOptions{
+			FallbackAfter: cfg.HeadSourceFallbackAfter,
+			Logger:        logger,
+		})
+	}
 }
