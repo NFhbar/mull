@@ -321,6 +321,42 @@ func TestEventsContextCancellation(t *testing.T) {
 	}
 }
 
+// TestEventsStoreCtxErrorIsQuiet pins the contract at server.go's events
+// handler: when the store returns context.Canceled or DeadlineExceeded
+// (regardless of why — client disconnect, server shutdown), the handler
+// returns silently with no 500 and no body. A future refactor that
+// accidentally flips this branch into a logged 500 would fail here.
+func TestEventsStoreCtxErrorIsQuiet(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"context.Canceled", context.Canceled},
+		{"context.DeadlineExceeded", context.DeadlineExceeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t, &fakeStore{queryErr: tc.err})
+			resp, err := http.Get(srv.URL + "/events")
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			// The handler returns without writing a status, so net/http
+			// defaults to 200 OK with an empty body. The load-bearing
+			// assertion is "not 500" — we must NOT surface the ctx
+			// cancellation as a server error.
+			if resp.StatusCode == http.StatusInternalServerError {
+				t.Fatalf("ctx cancellation surfaced as 500 (body=%q)", string(body))
+			}
+			if len(body) != 0 {
+				t.Fatalf("ctx cancellation wrote body=%q, want empty", string(body))
+			}
+		})
+	}
+}
+
 func TestMethodNotAllowed(t *testing.T) {
 	srv := newTestServer(t, &fakeStore{})
 	for _, route := range []string{"/healthz", "/checkpoint", "/events"} {

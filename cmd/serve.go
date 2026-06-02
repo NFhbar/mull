@@ -74,6 +74,13 @@ func runServe(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	// Intentional exception to the repo-wide errgroup-only goroutine policy
+	// (see repo-knowledge): http.Server.Shutdown must be invoked from a goroutine
+	// that does NOT own the ListenAndServe call, and the natural shape — block on
+	// ctx.Done in the caller, run ListenAndServe in a goroutine, then call
+	// Shutdown after ctx.Done — composes more cleanly as raw goroutine + select
+	// than as two errgroup members where the "wait for ctx, then Shutdown" leg
+	// would need its own context branch.
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("mull serve listening", "addr", serveAddr)

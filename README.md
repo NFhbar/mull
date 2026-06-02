@@ -248,6 +248,12 @@ curl -s 'localhost:8080/events?contract=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB
 The cursor is opaque (base64-encoded) — clients should pass it back
 verbatim and not parse it; the wire format may evolve.
 
+**Stop condition:** iterate until `next_cursor` is empty. Do *not* stop
+when a page returns fewer than `limit` rows — short pages are expected
+when `topic1`..`topic3` filters prune rows from the fetched window. A
+short page with a non-empty `next_cursor` means "this window had few
+matches; keep going" rather than "end of data".
+
 ### Topic-filter decode rules
 
 - `?topic0=0xABC` → filter on that value.
@@ -260,6 +266,13 @@ In v1, `topic0` is pushed into SQL (using the existing
 post-filtered in Go after the SQL scan. This is fine for the common
 case of "filter by event signature"; v2 may push higher topics into SQL
 once per-event typed tables (from codegen) become the primary read path.
+
+**Index coverage caveat:** the `topics` column is not separately
+indexed, so a query that filters on `topic0` alone (no `contract` and
+no block range) degrades to a full-table scan that LIKE-evaluates every
+row. For sustained use, pair `topic0` with either a `contract` or a
+bounded `from`/`to` so the existing `(block_number, log_index)` index
+can drive the scan. v2's per-event typed tables will obviate this.
 
 ### Operational notes
 

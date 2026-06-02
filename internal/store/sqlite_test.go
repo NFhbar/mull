@@ -194,7 +194,7 @@ func TestQueryFilters(t *testing.T) {
 		{"range 101..102", QueryFilter{FromBlock: u64Ptr(101), ToBlock: u64Ptr(102)}, 4},
 		{"contract+topic0", QueryFilter{Contract: "0xA", Topic0: strPtr("0xT0a")}, 5},
 		{"contract+topic1", QueryFilter{Contract: "0xA", Topic1: strPtr("0xT1b")}, 1},
-		{"limit clamp default", QueryFilter{Limit: 0}, 10},
+		{"zero limit applies default", QueryFilter{Limit: 0}, 10},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -294,6 +294,90 @@ func TestQueryCursorPagination(t *testing.T) {
 	}
 	if len(seen) != 250 {
 		t.Fatalf("saw %d events, want 250", len(seen))
+	}
+}
+
+// TestQueryPostFilterCursorPagination guards against silent data loss when a
+// topic1..3 post-filter strips enough rows from a fetched window that the
+// page comes back shorter than `limit`. Pre-fix the loop bailed with
+// `next_cursor: null` as soon as `len(out) <= limit`, hiding ~80% of matches
+// past the first window. Post-fix the cursor anchors on the last raw row
+// examined when SQL saturates, so iteration is exhaustive even at very low
+// match selectivity.
+func TestQueryPostFilterCursorPagination(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const total = 250
+	const matchEvery = 5
+	const want = total / matchEvery
+
+	events := make([]Event, 0, total)
+	wantHashes := make(map[string]bool, want)
+	for n := uint64(1); n <= total; n++ {
+		topic1 := "0xMISS"
+		if n%matchEvery == 0 {
+			topic1 = "0xHIT"
+		}
+		tx := fmt.Sprintf("0xt%d", n)
+		events = append(events, Event{
+			BlockNumber: n,
+			TxHash:      tx,
+			LogIndex:    0,
+			Address:     "0xc",
+			Topics:      []string{"0xT0", topic1},
+			Data:        "0x",
+		})
+		if topic1 == "0xHIT" {
+			wantHashes[tx] = true
+		}
+	}
+	if err := s.SaveEvents(ctx, events); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	seen := make(map[string]bool, want)
+	var cursor *EventCursor
+	for iter := 0; iter < 100; iter++ {
+		filter := QueryFilter{Topic1: strPtr("0xHIT"), Limit: 50, After: cursor}
+		page, next, err := s.Query(ctx, filter)
+		if err != nil {
+			t.Fatalf("iter %d: %v", iter, err)
+		}
+		for _, e := range page {
+			if seen[e.TxHash] {
+				t.Fatalf("duplicate event %s on iter %d", e.TxHash, iter)
+			}
+			if !wantHashes[e.TxHash] {
+				t.Fatalf("returned non-matching event %s on iter %d", e.TxHash, iter)
+			}
+			seen[e.TxHash] = true
+		}
+		if next == nil {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != want {
+		t.Fatalf("saw %d matches, want %d (pagination dropped %d)", len(seen), want, want-len(seen))
+	}
+}
+
+// TestQueryTopic0LikeWildcardNoEscape pins that a user-supplied % in topic0
+// can't widen the prefix LIKE pattern into "any row with multiple topics".
+// Pre-fix `?topic0=%` produced a SQL pattern of `%,%` that matched every
+// multi-topic event regardless of its actual topic0.
+func TestQueryTopic0LikeWildcardNoEscape(t *testing.T) {
+	s := newTestStore(t)
+	seedQueryEvents(t, s)
+	ctx := context.Background()
+
+	got, _, err := s.Query(ctx, QueryFilter{Topic0: strPtr("%")})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d events for topic0=%%, want 0 (LIKE metachars must be escaped)", len(got))
 	}
 }
 

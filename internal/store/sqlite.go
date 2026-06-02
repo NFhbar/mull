@@ -236,8 +236,10 @@ func (s *SQLite) Query(ctx context.Context, filter QueryFilter) ([]Event, *Event
 	if filter.Topic0 != nil {
 		// topics is a comma-joined list; topic0 is the first element. Exact
 		// match when it's the only topic, prefix match (with comma) otherwise.
-		where = append(where, "(topics = ? OR topics LIKE ?)")
-		args = append(args, *filter.Topic0, *filter.Topic0+",%")
+		// Escape LIKE metachars in the user-supplied topic so e.g. ?topic0=%
+		// can't widen the prefix pattern into a match-everything wildcard.
+		where = append(where, `(topics = ? OR topics LIKE ? ESCAPE '\')`)
+		args = append(args, *filter.Topic0, escapeLikePattern(*filter.Topic0)+",%")
 	}
 	if filter.After != nil {
 		// Strictly after (block, log_index).
@@ -250,11 +252,8 @@ func (s *SQLite) Query(ctx context.Context, filter QueryFilter) ([]Event, *Event
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
 	q += " ORDER BY block_number ASC, log_index ASC LIMIT ?"
-	// Higher-topic filters are applied in Go after the SQL scan. To keep the
-	// effective page size correct in that case we'd need a streaming loop;
-	// for now the post-filter is rare, so we still fetch limit+1 and accept
-	// that a page may come back short when topic1..3 strip rows. Documented
-	// in README.
+	// Over-fetch by 1 so a fully-saturated raw fetch is a reliable "SQL has
+	// more downstream" signal even when the Go-side post-filter prunes rows.
 	args = append(args, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -263,7 +262,21 @@ func (s *SQLite) Query(ctx context.Context, filter QueryFilter) ([]Event, *Event
 	}
 	defer rows.Close()
 
+	// Single-pass scan that decouples the cursor anchor from the post-filter:
+	// matches are accumulated into out (capped at limit); lastRaw tracks the
+	// last SQL-scanned (block, log_index) regardless of whether it survived
+	// the post-filter. Two distinct "more downstream" signals are handled
+	// inline:
+	//   1. matches saturate mid-scan (len(out) == limit and another match
+	//      arrives) — return immediately with cursor = last out entry so the
+	//      just-arrived match is the first hit of the next page.
+	//   2. SQL returned its full limit+1 raw rows but matches did NOT
+	//      saturate — cursor = lastRaw so the next page resumes past the
+	//      whole examined window; correct even when topic1..3 strip enough
+	//      rows that out is shorter than `limit`.
 	out := make([]Event, 0, limit)
+	rawCount := 0
+	var lastRaw EventCursor
 	for rows.Next() {
 		var (
 			e      Event
@@ -272,11 +285,17 @@ func (s *SQLite) Query(ctx context.Context, filter QueryFilter) ([]Event, *Event
 		if err := rows.Scan(&e.BlockNumber, &e.TxHash, &e.LogIndex, &e.Address, &topics, &e.Data); err != nil {
 			return nil, nil, fmt.Errorf("scan event: %w", err)
 		}
+		rawCount++
+		lastRaw = EventCursor{Block: e.BlockNumber, LogIndex: e.LogIndex}
 		if topics != "" {
 			e.Topics = strings.Split(topics, ",")
 		}
 		if !matchesHigherTopics(e.Topics, filter) {
 			continue
+		}
+		if len(out) >= limit {
+			last := out[len(out)-1]
+			return out, &EventCursor{Block: last.BlockNumber, LogIndex: last.LogIndex}, nil
 		}
 		out = append(out, e)
 	}
@@ -284,16 +303,26 @@ func (s *SQLite) Query(ctx context.Context, filter QueryFilter) ([]Event, *Event
 		return nil, nil, fmt.Errorf("iterate events: %w", err)
 	}
 
-	// We over-fetched by 1 to detect "more rows exist". If the fetched
-	// (post-filter) result is strictly greater than limit, the row at index
-	// limit-1 is the cursor anchor and we trim to limit; otherwise no more
-	// pages.
-	if len(out) > limit {
-		anchor := out[limit-1]
-		out = out[:limit]
-		return out, &EventCursor{Block: anchor.BlockNumber, LogIndex: anchor.LogIndex}, nil
+	if rawCount > limit {
+		anchor := lastRaw
+		return out, &anchor, nil
 	}
 	return out, nil, nil
+}
+
+// escapeLikePattern prefixes the SQL LIKE metacharacters (%, _) and the
+// escape character itself with a backslash so the caller's input can't
+// accidentally widen a prefix match. Pair with `ESCAPE '\'` in the SQL.
+func escapeLikePattern(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\\' || r == '%' || r == '_' {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func matchesHigherTopics(topics []string, f QueryFilter) bool {
