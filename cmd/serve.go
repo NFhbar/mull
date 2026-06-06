@@ -57,7 +57,7 @@ func runServe(ctx context.Context) error {
 
 	st, err := store.OpenSQLite(ctx, cfg.DBPath)
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		return translateMigrationSentinel(err, cfg.DBPath)
 	}
 	defer st.Close()
 

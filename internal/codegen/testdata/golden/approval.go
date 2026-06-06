@@ -84,13 +84,13 @@ func (s *approvalSink) Handle(ctx context.Context, e store.Event) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO events_erc20_approval (block_number, tx_hash, log_index, "owner", "spender", "value") VALUES (?, ?, ?, ?, ?, ?)`,
-		e.BlockNumber, e.TxHash, e.LogIndex, v.Owner.Hex(), v.Spender.Hex(), bigIntStr(v.Value),
+		`INSERT OR IGNORE INTO events_erc20_approval (source, block_number, tx_hash, log_index, "owner", "spender", "value") VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		e.Source, e.BlockNumber, e.TxHash, e.LogIndex, v.Owner.Hex(), v.Spender.Hex(), bigIntStr(v.Value),
 	)
 	return err
 }
 
-func (s *approvalSink) RewindTo(ctx context.Context, block uint64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM events_erc20_approval WHERE block_number >= ?`, block)
+func (s *approvalSink) RewindTo(ctx context.Context, source string, block uint64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM events_erc20_approval WHERE source = ? AND block_number >= ?`, source, block)
 	return err
 }

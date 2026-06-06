@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +21,7 @@ import (
 type fakeStore struct {
 	mu          sync.Mutex
 	checkpoint  uint64
+	checkpoints map[string]uint64 // multi-source Checkpoints() return
 	checkpErr   error
 	events      []store.Event
 	nextCursor  *store.EventCursor
@@ -29,23 +31,37 @@ type fakeStore struct {
 	queryBlock  chan struct{} // when non-nil Query blocks until closed or ctx done
 }
 
-func (f *fakeStore) SaveEvents(context.Context, []store.Event) error { return nil }
-func (f *fakeStore) Checkpoint(context.Context) (uint64, error) {
+func (f *fakeStore) SaveEvents(context.Context, string, []store.Event) error { return nil }
+func (f *fakeStore) Checkpoint(_ context.Context, _ string) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.checkpoint, f.checkpErr
 }
-func (f *fakeStore) SetCheckpoint(context.Context, uint64) error { return nil }
-func (f *fakeStore) RecordBlockHash(context.Context, uint64, string, string, uint64) error {
+func (f *fakeStore) SetCheckpoint(context.Context, string, uint64) error { return nil }
+func (f *fakeStore) Checkpoints(context.Context) (map[string]uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.checkpErr != nil {
+		return nil, f.checkpErr
+	}
+	if f.checkpoints != nil {
+		return f.checkpoints, nil
+	}
+	if f.checkpoint != 0 {
+		return map[string]uint64{"default": f.checkpoint}, nil
+	}
+	return map[string]uint64{}, nil
+}
+func (f *fakeStore) RecordBlockHash(context.Context, string, uint64, string, string, uint64) error {
 	return nil
 }
-func (f *fakeStore) RecentBlockHashes(context.Context, uint64) ([]store.BlockHashEntry, error) {
+func (f *fakeStore) RecentBlockHashes(context.Context, string, uint64) ([]store.BlockHashEntry, error) {
 	return nil, nil
 }
-func (f *fakeStore) BlockHashAt(context.Context, uint64) (store.BlockHashEntry, bool, error) {
+func (f *fakeStore) BlockHashAt(context.Context, string, uint64) (store.BlockHashEntry, bool, error) {
 	return store.BlockHashEntry{}, false, nil
 }
-func (f *fakeStore) RewindTo(context.Context, uint64) error { return nil }
+func (f *fakeStore) RewindTo(context.Context, string, uint64) error { return nil }
 func (f *fakeStore) Query(ctx context.Context, filter store.QueryFilter) ([]store.Event, *store.EventCursor, error) {
 	f.mu.Lock()
 	f.lastFilter = filter
@@ -106,9 +122,14 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-func TestCheckpoint(t *testing.T) {
-	t.Run("happy", func(t *testing.T) {
-		srv := newTestServer(t, &fakeStore{checkpoint: 12345})
+// TestCheckpointAlwaysReturnsMap pins the v2 uniform response shape: regardless
+// of whether ?source= is set, /checkpoint always returns
+// {"checkpoints": {<src>: <n>, …}}. v1 returned {"checkpoint": <n>} with no
+// source; the rename + always-map is the documented breaking change.
+func TestCheckpointAlwaysReturnsMap(t *testing.T) {
+	t.Run("no source — multi-source map", func(t *testing.T) {
+		st := &fakeStore{checkpoints: map[string]uint64{"a": 10, "b": 20}}
+		srv := newTestServer(t, st)
 		resp, err := http.Get(srv.URL + "/checkpoint")
 		if err != nil {
 			t.Fatalf("get: %v", err)
@@ -117,12 +138,32 @@ func TestCheckpoint(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("status = %d, want 200", resp.StatusCode)
 		}
-		var body map[string]uint64
+		var body checkpointResponse
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if body["checkpoint"] != 12345 {
-			t.Fatalf("checkpoint = %d, want 12345", body["checkpoint"])
+		if body.Checkpoints["a"] != 10 || body.Checkpoints["b"] != 20 {
+			t.Fatalf("checkpoints = %+v, want {a:10, b:20}", body.Checkpoints)
+		}
+	})
+	t.Run("with source — single-key map", func(t *testing.T) {
+		// ?source= reads from Checkpoints() so an unindexed source returns
+		// {} rather than {src:0} — seed the row to assert the happy path.
+		srv := newTestServer(t, &fakeStore{checkpoints: map[string]uint64{"usdc": 12345}})
+		resp, err := http.Get(srv.URL + "/checkpoint?source=usdc")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		var body checkpointResponse
+		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(body.Checkpoints) != 1 || body.Checkpoints["usdc"] != 12345 {
+			t.Fatalf("checkpoints = %+v, want {usdc:12345}", body.Checkpoints)
 		}
 	})
 	t.Run("store error", func(t *testing.T) {
@@ -396,5 +437,101 @@ func TestEventsFromToLimit(t *testing.T) {
 	}
 	if f.Limit != 50 {
 		t.Fatalf("Limit = %d, want 50", f.Limit)
+	}
+}
+
+// TestEventsFilterBySource pins that ?source= populates QueryFilter.Source
+// (as a pointer-tri-state) so the SQL pushdown can scope reads to one source.
+func TestEventsFilterBySource(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		st := &fakeStore{}
+		srv := newTestServer(t, st)
+		resp, err := http.Get(srv.URL + "/events?source=usdc_mainnet")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200", resp.StatusCode)
+		}
+		st.mu.Lock()
+		f := st.lastFilter
+		st.mu.Unlock()
+		if f.Source == nil || *f.Source != "usdc_mainnet" {
+			t.Fatalf("Source = %v, want &usdc_mainnet", f.Source)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		st := &fakeStore{}
+		srv := newTestServer(t, st)
+		resp, err := http.Get(srv.URL + "/events")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		resp.Body.Close()
+		st.mu.Lock()
+		f := st.lastFilter
+		st.mu.Unlock()
+		if f.Source != nil {
+			t.Fatalf("Source = %v, want nil (absent)", f.Source)
+		}
+	})
+}
+
+// TestMultiSourceCursorRoundTrip pins that the Source field of EventCursor
+// round-trips through the wire encoding (base64-of-JSON cursorPayload).
+func TestMultiSourceCursorRoundTrip(t *testing.T) {
+	c := store.EventCursor{Block: 100, LogIndex: 5, Source: "usdc_arb"}
+	encoded := encodeCursor(c)
+
+	st := &fakeStore{}
+	srv := newTestServer(t, st)
+	resp, err := http.Get(srv.URL + "/events?cursor=" + encoded)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+	st.mu.Lock()
+	got := st.lastFilter.After
+	st.mu.Unlock()
+	if got == nil {
+		t.Fatal("After = nil, want round-tripped cursor")
+	}
+	if got.Block != c.Block || got.LogIndex != c.LogIndex || got.Source != c.Source {
+		t.Fatalf("After = %+v, want %+v", *got, c)
+	}
+}
+
+// TestLegacyCursorHandledGracefully encodes a v1-shape cursor payload (no
+// `s` field) and feeds it through the v2 decoder. The decoded Source must be
+// the empty string — paging from this position is deterministic (empty sorts
+// strictly before any real source, so the next page resumes at the next event
+// after the boundary; one event may re-emit, which is the documented v1→v2
+// behaviour).
+func TestLegacyCursorHandledGracefully(t *testing.T) {
+	legacyJSON := []byte(`{"b":42,"l":7}`)
+	encoded := base64.URLEncoding.EncodeToString(legacyJSON)
+
+	st := &fakeStore{}
+	srv := newTestServer(t, st)
+	resp, err := http.Get(srv.URL + "/events?cursor=" + encoded)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	st.mu.Lock()
+	got := st.lastFilter.After
+	st.mu.Unlock()
+	if got == nil {
+		t.Fatal("After = nil — legacy cursor not accepted")
+	}
+	if got.Block != 42 || got.LogIndex != 7 {
+		t.Fatalf("legacy cursor decoded as {%d,%d}, want {42,7}", got.Block, got.LogIndex)
+	}
+	if got.Source != "" {
+		t.Fatalf("legacy cursor decoded with Source = %q, want \"\" (empty sorts first)", got.Source)
 	}
 }

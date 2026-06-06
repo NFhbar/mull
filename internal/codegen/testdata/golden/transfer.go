@@ -84,13 +84,13 @@ func (s *transferSink) Handle(ctx context.Context, e store.Event) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO events_erc20_transfer (block_number, tx_hash, log_index, "from", "to", "value") VALUES (?, ?, ?, ?, ?, ?)`,
-		e.BlockNumber, e.TxHash, e.LogIndex, v.From.Hex(), v.To.Hex(), bigIntStr(v.Value),
+		`INSERT OR IGNORE INTO events_erc20_transfer (source, block_number, tx_hash, log_index, "from", "to", "value") VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		e.Source, e.BlockNumber, e.TxHash, e.LogIndex, v.From.Hex(), v.To.Hex(), bigIntStr(v.Value),
 	)
 	return err
 }
 
-func (s *transferSink) RewindTo(ctx context.Context, block uint64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM events_erc20_transfer WHERE block_number >= ?`, block)
+func (s *transferSink) RewindTo(ctx context.Context, source string, block uint64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM events_erc20_transfer WHERE source = ? AND block_number >= ?`, source, block)
 	return err
 }
