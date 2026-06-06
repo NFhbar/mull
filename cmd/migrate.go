@@ -53,10 +53,15 @@ func runMigrate(ctx context.Context) error {
 	defer db.Close()
 
 	// WAL mode for parity with OpenSQLite — keeps the migration consistent with
-	// the runtime journal mode the rest of mull expects.
+	// the runtime journal mode the rest of mull expects. Assert the resulting
+	// mode so a silent fallback (read-only FS, non-WAL-capable medium) surfaces
+	// here at migrate time rather than confusingly at the next OpenSQLite.
 	var mode string
 	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
 		return fmt.Errorf("enable wal: %w", err)
+	}
+	if mode != "wal" {
+		return fmt.Errorf("enable wal: journal_mode=%q after PRAGMA, want %q", mode, "wal")
 	}
 
 	if err := store.MigrateV1ToV2(ctx, db); err != nil {

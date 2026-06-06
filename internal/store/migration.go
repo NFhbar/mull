@@ -32,10 +32,15 @@ func migrationStatementsV1ToV2() []string {
         )`,
 		`INSERT INTO events_v2 (source, block_number, tx_hash, log_index, address, topics, data)
          SELECT 'default', block_number, tx_hash, log_index, address, topics, data FROM events`,
-		`DROP INDEX IF EXISTS idx_events_block`,
+		// DROP TABLE events removes idx_events_block automatically — SQLite drops
+		// every index attached to the dropped table. No explicit DROP INDEX needed.
 		`DROP TABLE events`,
 		`ALTER TABLE events_v2 RENAME TO events`,
 		`CREATE INDEX idx_events_source_block ON events(source, block_number)`,
+		// Covers the no-?source= path of /events (ORDER BY block_number, log_index,
+		// source) so a paged cross-source read doesn't degrade to a full-table
+		// sort once the DB is populated.
+		`CREATE INDEX idx_events_block_log ON events(block_number, log_index)`,
 
 		// Checkpoint: rebuild with source PK.
 		`CREATE TABLE checkpoint_v2 (

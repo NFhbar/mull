@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/NFhbar/mull/internal/config"
 	"github.com/NFhbar/mull/internal/store"
 )
 
@@ -74,13 +75,26 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if q.Has("source") {
 		src := q.Get("source")
-		cp, err := s.store.Checkpoint(r.Context(), src)
+		if err := config.ValidateSourceName(src); err != nil {
+			s.logger.Warn("checkpoint query rejected", "param", "source", "value", src, "err", err.Error())
+			http.Error(w, "bad query param \"source\": "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Read from the multi-row map rather than store.Checkpoint so an unknown
+		// source returns `{"checkpoints":{}}` instead of `{"checkpoints":{src:0}}`
+		// — same shape as the no-?source= branch for unindexed sources, which
+		// lets clients diff "indexed at 0" from "never indexed."
+		cps, err := s.store.Checkpoints(r.Context())
 		if err != nil {
-			s.logger.Error("checkpoint read failed", "path", r.URL.Path, "err", err.Error())
+			s.logger.Error("checkpoints read failed", "path", r.URL.Path, "err", err.Error())
 			http.Error(w, "store error", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, checkpointResponse{Checkpoints: map[string]uint64{src: cp}})
+		out := map[string]uint64{}
+		if cp, ok := cps[src]; ok {
+			out[src] = cp
+		}
+		writeJSON(w, http.StatusOK, checkpointResponse{Checkpoints: out})
 		return
 	}
 	cps, err := s.store.Checkpoints(r.Context())
@@ -170,6 +184,9 @@ func parseQuery(q url.Values) (store.QueryFilter, *decodeError) {
 	f.Contract = q.Get("contract")
 	if q.Has("source") {
 		src := q.Get("source")
+		if err := config.ValidateSourceName(src); err != nil {
+			return f, &decodeError{param: "source", value: src, cause: err}
+		}
 		f.Source = &src
 	}
 

@@ -72,13 +72,18 @@ func (f *fakeRPC) BlockByHash(_ context.Context, hash string) (rpc.Header, error
 }
 
 type fakeStore struct {
-	mu            sync.Mutex
-	events        []store.Event
-	checkpoint    uint64
-	ranges        [][2]uint64
-	saveOrder     []uint64
-	saveCh        chan uint64
-	blockHashes   map[uint64]store.BlockHashEntry
+	mu sync.Mutex
+	events []store.Event
+	checkpoint uint64
+	// checkpointSource captures the source string the indexer-under-test
+	// passes to SetCheckpoint, so Checkpoints can report the real key
+	// instead of a hard-coded "test" — matches the real sqlite.go
+	// contract where rows determine the map.
+	checkpointSource string
+	ranges [][2]uint64
+	saveOrder []uint64
+	saveCh chan uint64
+	blockHashes map[uint64]store.BlockHashEntry
 	rewindToCalls []uint64
 }
 
@@ -102,16 +107,22 @@ func (s *fakeStore) Checkpoint(_ context.Context, _ string) (uint64, error) {
 	defer s.mu.Unlock()
 	return s.checkpoint, nil
 }
-func (s *fakeStore) SetCheckpoint(_ context.Context, _ string, b uint64) error {
+func (s *fakeStore) SetCheckpoint(_ context.Context, source string, b uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkpoint = b
+	s.checkpointSource = source
 	return nil
 }
 func (s *fakeStore) Checkpoints(context.Context) (map[string]uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return map[string]uint64{"test": s.checkpoint}, nil
+	// Mirror sqlite.Checkpoints: empty map until at least one SetCheckpoint
+	// row has been written.
+	if s.checkpointSource == "" {
+		return map[string]uint64{}, nil
+	}
+	return map[string]uint64{s.checkpointSource: s.checkpoint}, nil
 }
 func (s *fakeStore) RecordBlockHash(_ context.Context, _ string, number uint64, hash, parentHash string, capDepth uint64) error {
 	s.mu.Lock()

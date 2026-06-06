@@ -21,7 +21,18 @@ type SQLite struct {
 }
 
 func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
-	db, err := sql.Open("sqlite", path)
+	// Multi-source: per-source Indexers write concurrently to the same file.
+	// busy_timeout must be set on every pooled connection or the second writer
+	// to land during another's transaction sees SQLITE_BUSY immediately. The
+	// _pragma= DSN form runs the PRAGMA on each new connection the driver
+	// opens; setting it via Exec after sql.Open would only land on one conn.
+	dsn := path
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	dsn += sep + "_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -96,6 +107,9 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (source, tx_hash, log_index)
 );
 CREATE INDEX IF NOT EXISTS idx_events_source_block ON events(source, block_number);
+-- Covers the no-?source= path of /events (ORDER BY block_number, log_index,
+-- source) so a paged cross-source read doesn't degrade to a full-table sort.
+CREATE INDEX IF NOT EXISTS idx_events_block_log ON events(block_number, log_index);
 
 CREATE TABLE IF NOT EXISTS checkpoint (
     source       TEXT PRIMARY KEY,

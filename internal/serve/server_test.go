@@ -147,7 +147,9 @@ func TestCheckpointAlwaysReturnsMap(t *testing.T) {
 		}
 	})
 	t.Run("with source — single-key map", func(t *testing.T) {
-		srv := newTestServer(t, &fakeStore{checkpoint: 12345})
+		// ?source= reads from Checkpoints() so an unindexed source returns
+		// {} rather than {src:0} — seed the row to assert the happy path.
+		srv := newTestServer(t, &fakeStore{checkpoints: map[string]uint64{"usdc": 12345}})
 		resp, err := http.Get(srv.URL + "/checkpoint?source=usdc")
 		if err != nil {
 			t.Fatalf("get: %v", err)

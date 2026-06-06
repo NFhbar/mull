@@ -110,7 +110,8 @@ rpc_retry_base: 500ms
 rpc_retry_max_delay: 30s
 rpc_retry_max_attempts: 5
 
-# Bounded worker pool for catch-up — applies PER SOURCE.
+# Bounded worker pool for catch-up. Single global knob; each source gets a
+# pool of this size.
 concurrency: 1
 reorg_depth: 64
 
@@ -131,10 +132,11 @@ sources:
     start_block: 200000000
 ```
 
-**Aggregate RPC pressure.** `concurrency` is per-source: running 3 sources
-at `concurrency: 4` puts up to 12 in-flight `eth_getLogs` calls in flight.
-A one-time WARN log fires at boot when `len(sources) * concurrency > 16`
-so you spot the multiplier before hitting a 429 cliff.
+**Aggregate RPC pressure.** `concurrency` is a single global knob and each
+source gets a pool of this size — so 3 sources at `concurrency: 4` puts up
+to 12 in-flight `eth_getLogs` calls at peak. A one-time WARN log fires at
+boot when `len(sources) * concurrency > 16` so you spot the multiplier
+before hitting a 429 cliff.
 
 Legacy single-source shape (still accepted):
 

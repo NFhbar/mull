@@ -19,10 +19,11 @@ rpc_retry_base: 500ms
 rpc_retry_max_delay: 30s
 rpc_retry_max_attempts: 5
 
-# Bounded worker pool for catch-up. Applies PER SOURCE — running with
-# concurrency=4 and three sources means up to 12 in-flight RPC requests
-# at peak. A WARN log fires at boot when len(sources) * concurrency > 16
-# so you spot the aggregate before hitting a 429 cliff.
+# Bounded worker pool for catch-up. Single global knob; each source gets
+# its own pool of this size — so running with concurrency=4 and three
+# sources means up to 12 in-flight RPC requests at peak. A WARN log fires
+# at boot when len(sources) * concurrency > 16 so you spot the aggregate
+# before hitting a 429 cliff.
 concurrency: 1
 
 # Reorg detection horizon. The indexer keeps the last `reorg_depth`

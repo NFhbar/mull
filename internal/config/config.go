@@ -35,8 +35,11 @@ type Config struct {
 	// one Source from the legacy top-level fields (rpc_url, contract, …).
 	Sources []Source `yaml:"sources"`
 
-	// Process-global fields. Concurrency stays global in v2 by design (research
-	// deferred per-source concurrency to a follow-up).
+	// Process-global fields. Concurrency is a single global knob; each source
+	// gets its own worker pool sized to that value (research deferred per-source
+	// concurrency overrides to a follow-up). The aggregate in-flight RPC ceiling
+	// is therefore len(Sources) * Concurrency — surfaced by the boot-time WARN
+	// when that product exceeds 16.
 	DBPath              string        `yaml:"db_path"`
 	PollInterval        time.Duration `yaml:"poll_interval"`
 	RPCRetryBase        time.Duration `yaml:"rpc_retry_base"`
@@ -269,6 +272,11 @@ func (s *Source) validate() error {
 	}
 	return nil
 }
+
+// ValidateSourceName is the exported wrapper around validateSourceName so the
+// HTTP boundary in internal/serve can reject `?source=` values that wouldn't
+// have validated as a config-side source name — keeps one canonical rule.
+func ValidateSourceName(name string) error { return validateSourceName(name) }
 
 // validateSourceName enforces [a-z0-9_-]{1,64}. The narrow charset keeps names
 // safe everywhere they end up: log structured fields, cursor payloads, table
