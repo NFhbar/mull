@@ -15,11 +15,12 @@ import (
 const SchemaDDL = ` + "`" + `{{range $i, $e := .}}{{if $i}}
 
 {{end}}CREATE TABLE IF NOT EXISTS {{$e.TableName}} (
+    source       TEXT    NOT NULL,
     block_number INTEGER NOT NULL,
     tx_hash      TEXT    NOT NULL,
     log_index    INTEGER NOT NULL,
 {{range $e.AllFields}}    "{{.ColName}}" {{.SQLType}} NOT NULL,
-{{end}}    PRIMARY KEY (tx_hash, log_index)
+{{end}}    PRIMARY KEY (source, tx_hash, log_index)
 );{{end}}` + "`" + `
 
 func ApplySchema(ctx context.Context, db *sql.DB) error {
@@ -217,14 +218,14 @@ func (s *{{.FileBase}}Sink) Handle(ctx context.Context, e store.Event) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		` + "`" + `INSERT OR IGNORE INTO {{.TableName}} (block_number, tx_hash, log_index{{ range .AllFields }}, "{{.ColName}}"{{end}}) VALUES (?, ?, ?{{ range .AllFields }}, ?{{end}})` + "`" + `,
-		e.BlockNumber, e.TxHash, e.LogIndex{{ range .AllFields }}, {{.BindExpr}}{{end}},
+		` + "`" + `INSERT OR IGNORE INTO {{.TableName}} (source, block_number, tx_hash, log_index{{ range .AllFields }}, "{{.ColName}}"{{end}}) VALUES (?, ?, ?, ?{{ range .AllFields }}, ?{{end}})` + "`" + `,
+		e.Source, e.BlockNumber, e.TxHash, e.LogIndex{{ range .AllFields }}, {{.BindExpr}}{{end}},
 	)
 	return err
 }
 
-func (s *{{.FileBase}}Sink) RewindTo(ctx context.Context, block uint64) error {
-	_, err := s.db.ExecContext(ctx, ` + "`" + `DELETE FROM {{.TableName}} WHERE block_number >= ?` + "`" + `, block)
+func (s *{{.FileBase}}Sink) RewindTo(ctx context.Context, source string, block uint64) error {
+	_, err := s.db.ExecContext(ctx, ` + "`" + `DELETE FROM {{.TableName}} WHERE source = ? AND block_number >= ?` + "`" + `, source, block)
 	return err
 }
 `

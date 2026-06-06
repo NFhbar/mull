@@ -13,11 +13,17 @@ single Go binary.
 
 ```sh
 go build -o mull .
-cp mull.example.yaml mull.yaml   # edit RPC URL, contract, topics, start_block
+cp mull.example.yaml mull.yaml   # edit sources: list — see Configuration below
 ./mull index --config mull.yaml
 ```
 
-Stop with `Ctrl-C`; the next run resumes from the last persisted block.
+Stop with `Ctrl-C`; the next run resumes each source from its last persisted
+block. All sources run under one `errgroup` — SIGINT/SIGTERM or any hard
+error gracefully stops every source.
+
+**Upgrading from v1?** Run `./mull migrate --config mull.yaml` once before
+`mull index`. See [MIGRATION.md](MIGRATION.md) for the full delta — schema,
+config shape, and `mull serve` API changes.
 
 Typed event decoding (per-event SQLite tables + Go structs) is opt-in via
 `mull codegen` — see [Codegen (optional)](#codegen-optional) below.
@@ -89,13 +95,54 @@ distinct aliases.
 
 ## Configuration
 
-`mull.yaml`:
+`mull.yaml` is a list of `sources:` (one per (chain, contract) target) plus
+process-global fields. A legacy single-source config (top-level `rpc_url:`
+/ `contract:` / etc) is still accepted via a backward-compat shim — it
+loads as one source named `default`. See [MIGRATION.md](MIGRATION.md) for
+the v1 shape.
+
+```yaml
+db_path: "./mull.db"
+poll_interval: 5s          # delay between head polls once caught up
+
+# Global retry knobs for transient RPC errors (5xx, 429, network blips).
+rpc_retry_base: 500ms
+rpc_retry_max_delay: 30s
+rpc_retry_max_attempts: 5
+
+# Bounded worker pool for catch-up — applies PER SOURCE.
+concurrency: 1
+reorg_depth: 64
+
+sources:
+  - name: usdc_mainnet     # [a-z0-9_-]{1,64}, unique
+    rpc_url: "https://ethereum-rpc.publicnode.com"
+    contract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # USDC
+    topics:
+      - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"  # Transfer
+    start_block: 19000000
+    chunk_size: 500        # blocks per eth_getLogs request
+
+  - name: usdc_arbitrum
+    rpc_url: "https://arb1.arbitrum.io/rpc"
+    contract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+    topics:
+      - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+    start_block: 200000000
+```
+
+**Aggregate RPC pressure.** `concurrency` is per-source: running 3 sources
+at `concurrency: 4` puts up to 12 in-flight `eth_getLogs` calls in flight.
+A one-time WARN log fires at boot when `len(sources) * concurrency > 16`
+so you spot the multiplier before hitting a 429 cliff.
+
+Legacy single-source shape (still accepted):
 
 ```yaml
 rpc_url: "https://ethereum-rpc.publicnode.com"
-contract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" # USDC
+contract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 topics:
-  - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" # Transfer
+  - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 start_block: 19000000
 chunk_size: 500 # blocks per eth_getLogs request
 poll_interval: 5s # delay between head polls once caught up
@@ -251,16 +298,25 @@ curl -s localhost:8080/healthz
 # {"status":"ok"}
 
 curl -s localhost:8080/checkpoint
-# {"checkpoint":19000500}
+# {"checkpoints":{"usdc_mainnet":19000500,"usdc_arbitrum":200001234}}
 
-curl -s 'localhost:8080/events?contract=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48&from=19000000&to=19000010&limit=50'
-# {"events":[{"block_number":...,"tx_hash":"0x...","log_index":0,"address":"0x...","topics":["0x..."],"data":"0x..."}, ...],"next_cursor":"<opaque>"}
+curl -s 'localhost:8080/checkpoint?source=usdc_mainnet'
+# {"checkpoints":{"usdc_mainnet":19000500}}
+
+curl -s 'localhost:8080/events?source=usdc_mainnet&from=19000000&to=19000010&limit=50'
+# {"events":[{"source":"usdc_mainnet","block_number":...,"tx_hash":"0x...","log_index":0,"address":"0x...","topics":["0x..."],"data":"0x..."}, ...],"next_cursor":"<opaque>"}
 ```
+
+**`/checkpoint` shape (breaking change vs v1).** Response is ALWAYS
+`{"checkpoints": {<src>: <n>, …}}` regardless of whether `?source=` is
+set. v1 returned `{"checkpoint": <n>}`; clients must update to read
+`body.checkpoints[<source>]`. See [MIGRATION.md](MIGRATION.md).
 
 ### Query parameters (`/events`)
 
 | param | meaning |
 | --- | --- |
+| `source` | restrict to one source's events (omit to query across all sources) |
 | `contract` | event source address (exact match) |
 | `topic0`..`topic3` | indexed topic match by position |
 | `from` / `to` | inclusive block-number bounds |
@@ -365,8 +421,7 @@ go build ./...
    is acceptable for most use cases, and getting subscription lifecycle
    - reconnect right adds nontrivial complexity.
 
-6. **Multi-contract / multi-chain.** _(scope expansion)_
+6. ~~**Multi-contract / multi-chain.**~~ _(shipped)_
    Multiple indexer instances driven by a sources list in config, each
-   with its own checkpoint. Requires reworking the config schema, the
-   store layout (checkpoint per source), and the CLI to coordinate
-   shutdown across goroutines.
+   with its own checkpoint. Now first-class — see the [Configuration](#configuration)
+   section and [MIGRATION.md](MIGRATION.md) for v1→v2 upgrade.

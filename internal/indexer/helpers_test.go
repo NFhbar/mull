@@ -76,13 +76,13 @@ type fakeStore struct {
 	events        []store.Event
 	checkpoint    uint64
 	ranges        [][2]uint64
-	saveOrder     []uint64    // block_number of events[0] for each SaveEvents call
-	saveCh        chan uint64 // optional: signals on each SaveEvents call (tests that need synchronization)
+	saveOrder     []uint64
+	saveCh        chan uint64
 	blockHashes   map[uint64]store.BlockHashEntry
 	rewindToCalls []uint64
 }
 
-func (s *fakeStore) SaveEvents(_ context.Context, events []store.Event) error {
+func (s *fakeStore) SaveEvents(_ context.Context, _ string, events []store.Event) error {
 	s.mu.Lock()
 	s.events = append(s.events, events...)
 	var first uint64
@@ -97,18 +97,23 @@ func (s *fakeStore) SaveEvents(_ context.Context, events []store.Event) error {
 	}
 	return nil
 }
-func (s *fakeStore) Checkpoint(context.Context) (uint64, error) {
+func (s *fakeStore) Checkpoint(_ context.Context, _ string) (uint64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.checkpoint, nil
 }
-func (s *fakeStore) SetCheckpoint(_ context.Context, b uint64) error {
+func (s *fakeStore) SetCheckpoint(_ context.Context, _ string, b uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkpoint = b
 	return nil
 }
-func (s *fakeStore) RecordBlockHash(_ context.Context, number uint64, hash, parentHash string, capDepth uint64) error {
+func (s *fakeStore) Checkpoints(context.Context) (map[string]uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]uint64{"test": s.checkpoint}, nil
+}
+func (s *fakeStore) RecordBlockHash(_ context.Context, _ string, number uint64, hash, parentHash string, capDepth uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.blockHashes == nil {
@@ -134,14 +139,13 @@ func (s *fakeStore) RecordBlockHash(_ context.Context, number uint64, hash, pare
 	return nil
 }
 
-func (s *fakeStore) RecentBlockHashes(_ context.Context, limit uint64) ([]store.BlockHashEntry, error) {
+func (s *fakeStore) RecentBlockHashes(_ context.Context, _ string, limit uint64) ([]store.BlockHashEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	nums := make([]uint64, 0, len(s.blockHashes))
 	for n := range s.blockHashes {
 		nums = append(nums, n)
 	}
-	// Descending sort.
 	for i := 1; i < len(nums); i++ {
 		for j := i; j > 0 && nums[j-1] < nums[j]; j-- {
 			nums[j-1], nums[j] = nums[j], nums[j-1]
@@ -157,14 +161,14 @@ func (s *fakeStore) RecentBlockHashes(_ context.Context, limit uint64) ([]store.
 	return out, nil
 }
 
-func (s *fakeStore) BlockHashAt(_ context.Context, number uint64) (store.BlockHashEntry, bool, error) {
+func (s *fakeStore) BlockHashAt(_ context.Context, _ string, number uint64) (store.BlockHashEntry, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.blockHashes[number]
 	return e, ok, nil
 }
 
-func (s *fakeStore) RewindTo(_ context.Context, block uint64) error {
+func (s *fakeStore) RewindTo(_ context.Context, _ string, block uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rewindToCalls = append(s.rewindToCalls, block)

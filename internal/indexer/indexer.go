@@ -15,6 +15,10 @@ import (
 )
 
 type Options struct {
+	// Source is the per-source key threaded through every Store call. Required:
+	// New panics on an empty Source so an accidental zero-value Options never
+	// silently writes rows under source = "" alongside real sources.
+	Source       string
 	Contract     string
 	Topics       []string
 	ChunkSize    uint64
@@ -34,6 +38,7 @@ type Options struct {
 type Indexer struct {
 	rpc      rpc.Client
 	store    store.Store
+	source   string
 	contract string
 	topics   []string
 	chunkSize uint64
@@ -60,6 +65,9 @@ type Indexer struct {
 }
 
 func New(client rpc.Client, st store.Store, opts Options) *Indexer {
+	if opts.Source == "" {
+		panic("indexer.New: opts.Source is required")
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -92,6 +100,7 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 	return &Indexer{
 		rpc:           client,
 		store:         st,
+		source:        opts.Source,
 		contract:      opts.Contract,
 		topics:        opts.Topics,
 		chunkSize:     opts.ChunkSize,
@@ -100,7 +109,7 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 		concurrency:   concurrency,
 		reorgDepth:    reorgDepth,
 		head:          head,
-		log:           logger.With("contract", opts.Contract),
+		log:           logger.With("source", opts.Source, "contract", opts.Contract),
 		sinksByTopic0: sinksByTopic0,
 		wildcardSinks: wildcardSinks,
 		allSinks:      allSinks,
@@ -113,7 +122,7 @@ func New(client rpc.Client, st store.Store, opts Options) *Indexer {
 // channel drives one reconcileHead+catchUp cycle. The checkpoint is the next
 // block to index.
 func (i *Indexer) Run(ctx context.Context) error {
-	cursor, err := i.store.Checkpoint(ctx)
+	cursor, err := i.store.Checkpoint(ctx, i.source)
 	if err != nil {
 		return fmt.Errorf("load checkpoint: %w", err)
 	}
@@ -181,12 +190,12 @@ func (i *Indexer) Run(ctx context.Context) error {
 // cursorHint is non-zero only when a rewind occurred; the caller must replace
 // its in-memory cursor with cursorHint so catchUp re-fetches the rewound range.
 func (i *Indexer) reconcileHead(ctx context.Context, newHead rpc.Header) (head uint64, cursorHint uint64, err error) {
-	recent, err := i.store.RecentBlockHashes(ctx, 1)
+	recent, err := i.store.RecentBlockHashes(ctx, i.source, 1)
 	if err != nil {
 		return 0, 0, fmt.Errorf("read recent hashes: %w", err)
 	}
 	if len(recent) == 0 {
-		if err := i.store.RecordBlockHash(ctx, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
+		if err := i.store.RecordBlockHash(ctx, i.source, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
 			return 0, 0, fmt.Errorf("seed head hash: %w", err)
 		}
 		return newHead.Number, 0, nil
@@ -197,7 +206,7 @@ func (i *Indexer) reconcileHead(ctx context.Context, newHead rpc.Header) (head u
 	// Re-anchor on the canonical head and let catchUp resume; reorg detection
 	// re-arms once the cursor advances to within reorg_depth of the tip.
 	if newHead.Number > recent[0].Number+i.reorgDepth {
-		if err := i.store.RecordBlockHash(ctx, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
+		if err := i.store.RecordBlockHash(ctx, i.source, newHead.Number, newHead.Hash, newHead.ParentHash, i.reorgDepth); err != nil {
 			return 0, 0, fmt.Errorf("re-anchor head hash: %w", err)
 		}
 		i.log.Warn("re-anchoring on head; reorg detection suspended until cursor catches up", "head", newHead.Number, "oldest_stored", recent[0].Number, "gap", newHead.Number-recent[0].Number)
@@ -208,7 +217,7 @@ func (i *Indexer) reconcileHead(ctx context.Context, newHead rpc.Header) (head u
 	cur := newHead
 	var ancestor *rpc.Header
 	for steps := uint64(0); steps < i.reorgDepth; steps++ {
-		stored, ok, err := i.store.BlockHashAt(ctx, cur.Number)
+		stored, ok, err := i.store.BlockHashAt(ctx, i.source, cur.Number)
 		if err != nil {
 			return 0, 0, fmt.Errorf("lookup stored hash: %w", err)
 		}
@@ -242,12 +251,12 @@ func (i *Indexer) reconcileHead(ctx context.Context, newHead rpc.Header) (head u
 		// rewindSinks runs before store.RewindTo so a sink failure leaves the
 		// store untouched; the next reconcileHead re-detects the same reorg
 		// and retries the whole rewind from scratch. Generated sink rewinds
-		// are `DELETE FROM <table> WHERE block_number >= ?` — idempotent, so
-		// partial progress on the retry is safe.
+		// are `DELETE FROM <table> WHERE source = ? AND block_number >= ?` —
+		// idempotent, so partial progress on the retry is safe.
 		if err := i.rewindSinks(ctx, rewindTarget); err != nil {
 			return 0, 0, err
 		}
-		if err := i.store.RewindTo(ctx, rewindTarget); err != nil {
+		if err := i.store.RewindTo(ctx, i.source, rewindTarget); err != nil {
 			return 0, 0, fmt.Errorf("rewind to %d: %w", rewindTarget, err)
 		}
 		cursorHint = rewindTarget
@@ -255,7 +264,7 @@ func (i *Indexer) reconcileHead(ctx context.Context, newHead rpc.Header) (head u
 	}
 
 	for _, h := range walked {
-		if err := i.store.RecordBlockHash(ctx, h.Number, h.Hash, h.ParentHash, i.reorgDepth); err != nil {
+		if err := i.store.RecordBlockHash(ctx, i.source, h.Number, h.Hash, h.ParentHash, i.reorgDepth); err != nil {
 			return 0, 0, fmt.Errorf("record hash %d: %w", h.Number, err)
 		}
 	}
@@ -267,7 +276,7 @@ func (i *Indexer) reconcileHead(ctx context.Context, newHead rpc.Header) (head u
 // resume has something to anchor against. No-op when block_hashes already has
 // entries or when the indexer hasn't indexed anything yet (cursor == 0).
 func (i *Indexer) backfillBlockHashes(ctx context.Context, cursor uint64) error {
-	recent, err := i.store.RecentBlockHashes(ctx, 1)
+	recent, err := i.store.RecentBlockHashes(ctx, i.source, 1)
 	if err != nil {
 		return fmt.Errorf("backfill: read recent: %w", err)
 	}
@@ -292,7 +301,7 @@ func (i *Indexer) backfillBlockHashes(ctx context.Context, cursor uint64) error 
 			i.log.Warn("backfill block_hashes failed; reorg detection will warm up over time", "block", n, "err", err)
 			return nil
 		}
-		if err := i.store.RecordBlockHash(ctx, h.Number, h.Hash, h.ParentHash, i.reorgDepth); err != nil {
+		if err := i.store.RecordBlockHash(ctx, i.source, h.Number, h.Hash, h.ParentHash, i.reorgDepth); err != nil {
 			return fmt.Errorf("backfill: record hash %d: %w", n, err)
 		}
 	}
@@ -361,7 +370,7 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 					return fmt.Errorf("get logs [%d,%d]: %w", r.from, r.to, err)
 				}
 				select {
-				case results <- chunkResult{from: r.from, to: r.to, events: toEvents(logs), startAt: start, fetchedAt: time.Now()}:
+				case results <- chunkResult{from: r.from, to: r.to, events: i.toEvents(logs), startAt: start, fetchedAt: time.Now()}:
 				case <-wctx.Done():
 					return wctx.Err()
 				}
@@ -386,7 +395,7 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 				if !ok {
 					break
 				}
-				if err := i.store.SaveEvents(gctx, ready.events); err != nil {
+				if err := i.store.SaveEvents(gctx, i.source, ready.events); err != nil {
 					return fmt.Errorf("save events: %w", err)
 				}
 				for _, ev := range ready.events {
@@ -395,7 +404,7 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 					}
 				}
 				next := ready.to + 1
-				if err := i.store.SetCheckpoint(gctx, next); err != nil {
+				if err := i.store.SetCheckpoint(gctx, i.source, next); err != nil {
 					return fmt.Errorf("set checkpoint: %w", err)
 				}
 				i.log.Info("indexed range",
@@ -424,12 +433,13 @@ func (i *Indexer) runScheduler(ctx context.Context, from, head uint64, ranges []
 }
 
 // rewindSinks fans a rewind through every registered sink so each generated
-// typed table drops orphaned rows from blocks ≥ block. Iterates allSinks
-// (registration order) rather than sinksByTopic0 (a Go map) so the on-disk
-// residue from a partial-failure mid-fanout is deterministic across runs.
+// typed table drops orphaned rows from blocks ≥ block for THIS source.
+// Iterates allSinks (registration order) rather than sinksByTopic0 (a Go map)
+// so the on-disk residue from a partial-failure mid-fanout is deterministic
+// across runs.
 func (i *Indexer) rewindSinks(ctx context.Context, block uint64) error {
 	for _, sink := range i.allSinks {
-		if err := sink.RewindTo(ctx, block); err != nil {
+		if err := sink.RewindTo(ctx, i.source, block); err != nil {
 			return fmt.Errorf("sink %s rewind: %w", sink.SinkID(), err)
 		}
 	}
@@ -457,10 +467,13 @@ func (i *Indexer) dispatchSinks(ctx context.Context, ev store.Event) error {
 	return nil
 }
 
-func toEvents(logs []rpc.Log) []store.Event {
+// toEvents maps RPC log records into store.Event records, stamping each with
+// the indexer's source. Sinks downstream see e.Source via Event.Source.
+func (i *Indexer) toEvents(logs []rpc.Log) []store.Event {
 	out := make([]store.Event, len(logs))
-	for i, l := range logs {
-		out[i] = store.Event{
+	for idx, l := range logs {
+		out[idx] = store.Event{
+			Source:      i.source,
 			BlockNumber: l.BlockNumber,
 			TxHash:      l.TxHash,
 			LogIndex:    l.LogIndex,

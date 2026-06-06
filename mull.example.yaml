@@ -1,53 +1,64 @@
-rpc_url: "https://cloudflare-eth.com"
-# Optional WebSocket endpoint for eth_subscribe("newHeads") head streaming.
-# Providers that split HTTP/WS (Alchemy, Quicknode, Infura, …) take a
-# different hostname/path for WSS — example:
-#   rpc_url:    "https://eth-mainnet.g.alchemy.com/v2/<key>"
-#   ws_rpc_url: "wss://eth-mainnet.g.alchemy.com/v2/<key>"
-# Required when head_source is "ws". Leave unset to stay on polling.
-ws_rpc_url: ""                 # (optional, ws:// or wss://)
-contract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # USDC
-topics:
-  - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"  # Transfer(address,address,uint256)
-start_block: 19000000
-chunk_size: 500
+# Multi-source mull config. Each entry under `sources:` indexes one
+# (chain, contract, topics) tuple into a shared SQLite database.
+#
+# Single-source legacy configs (top-level rpc_url/contract/etc) are still
+# accepted via a backward-compat shim — they load as one source named
+# "default". See MIGRATION.md.
+
+db_path: ./mull.db
+
+# Global polling cadence used by the polling head source and the
+# WebSocket fallback. Per-source head_source_fallback_after overrides
+# only the WS demotion window.
 poll_interval: 5s
-db_path: "./mull.db"
 
 # RPC retry knobs (optional — defaults shown below). Transient errors
 # (5xx, 429, network blips) are retried with exponential backoff + jitter.
-rpc_retry_base: 500ms          # (optional)
-rpc_retry_max_delay: 30s       # (optional)
-rpc_retry_max_attempts: 5      # (optional)
+# These are global; each source's HTTP client picks them up.
+rpc_retry_base: 500ms
+rpc_retry_max_delay: 30s
+rpc_retry_max_attempts: 5
 
-# Bounded worker pool for catch-up. Default 1 (sequential, matches today's
-# behaviour). 4 is a sane shared-RPC default; ceiling is 8. Higher values
-# increase pressure on the RPC — rely on the rpc_retry_* knobs above to
-# absorb 429s on rate-limited endpoints.
-concurrency: 1                 # (optional, 1..8)
+# Bounded worker pool for catch-up. Applies PER SOURCE — running with
+# concurrency=4 and three sources means up to 12 in-flight RPC requests
+# at peak. A WARN log fires at boot when len(sources) * concurrency > 16
+# so you spot the aggregate before hitting a 429 cliff.
+concurrency: 1
 
-# Reorg detection horizon. The indexer keeps the last `reorg_depth` block
-# headers and walks parent-hash on each head reconcile to detect divergence.
-# If a reorg deeper than `reorg_depth` is observed, the indexer exits with a
-# non-zero status; raise this value and restart. On cold resume the indexer
-# back-fills `reorg_depth` recent block headers from the RPC before entering
-# the poll loop, so detection is armed immediately.
-reorg_depth: 64                # (optional, 1..1024)
+# Reorg detection horizon. The indexer keeps the last `reorg_depth`
+# block headers PER SOURCE and walks parent-hash on each head reconcile
+# to detect divergence.
+reorg_depth: 64
 
-# Path to the contract ABI JSON used by `mull codegen` to emit typed event
-# structs, SQLite migrations, and sinks under internal/gen/. An empty string
-# disables codegen — the indexer falls back to raw events only. abi_path is
-# read by `mull codegen` only; the indexer never consults it at runtime.
-abi_path: ""                   # (optional, codegen input)
+sources:
+  - name: usdc_mainnet
+    rpc_url: https://cloudflare-eth.com
+    # Optional WSS endpoint for eth_subscribe("newHeads"). Required when
+    # head_source is "ws"; recommended for "auto" if your provider offers it.
+    ws_rpc_url: ""
+    contract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"  # USDC mainnet
+    topics:
+      - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"  # Transfer
+    start_block: 19000000
+    chunk_size: 500
+    # Path to the contract ABI JSON used by `mull codegen` to emit typed
+    # event structs. Empty disables codegen for this source.
+    abi_path: ""
+    # How the indexer learns about new chain heads:
+    #   ws    — eth_subscribe("newHeads") over WSS; requires ws_rpc_url
+    #   poll  — eth_getBlockByNumber("latest") on poll_interval (pre-WSS behaviour)
+    #   auto  — ws when ws_rpc_url is set, otherwise poll (default)
+    head_source: auto
+    head_source_fallback_after: 30s
 
-# How the indexer learns about new chain heads:
-#   ws    — eth_subscribe("newHeads") over WSS; requires ws_rpc_url
-#   poll  — eth_getBlockByNumber("latest") on poll_interval (pre-WSS behaviour)
-#   auto  — ws when ws_rpc_url is set, otherwise poll (default)
-head_source: "auto"            # (optional, ws|poll|auto)
-
-# Window of uninterrupted WS failure after which the source demotes to
-# polling for the remainder of the run. The timer resets on each successfully
-# delivered head, so brief upstream blips don't permanently demote you to
-# polling. Once demoted, only a restart returns the source to WS.
-head_source_fallback_after: 30s  # (optional, >= 1s)
+  - name: usdc_arbitrum
+    rpc_url: https://arb1.arbitrum.io/rpc
+    ws_rpc_url: ""
+    contract: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"  # USDC on Arbitrum
+    topics:
+      - "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"  # Transfer
+    start_block: 200000000
+    chunk_size: 1000
+    abi_path: ""
+    head_source: auto
+    head_source_fallback_after: 30s

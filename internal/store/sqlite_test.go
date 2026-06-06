@@ -18,11 +18,13 @@ func newTestStore(t *testing.T) *SQLite {
 	return s
 }
 
+const defaultSrc = "default"
+
 func TestCheckpointRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	got, err := s.Checkpoint(ctx)
+	got, err := s.Checkpoint(ctx, defaultSrc)
 	if err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
@@ -30,17 +32,17 @@ func TestCheckpointRoundTrip(t *testing.T) {
 		t.Fatalf("empty store checkpoint = %d, want 0", got)
 	}
 
-	if err := s.SetCheckpoint(ctx, 100); err != nil {
+	if err := s.SetCheckpoint(ctx, defaultSrc, 100); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	if got, _ := s.Checkpoint(ctx); got != 100 {
+	if got, _ := s.Checkpoint(ctx, defaultSrc); got != 100 {
 		t.Fatalf("after set: %d, want 100", got)
 	}
 
-	if err := s.SetCheckpoint(ctx, 250); err != nil {
+	if err := s.SetCheckpoint(ctx, defaultSrc, 250); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if got, _ := s.Checkpoint(ctx); got != 250 {
+	if got, _ := s.Checkpoint(ctx, defaultSrc); got != 250 {
 		t.Fatalf("after update: %d, want 250", got)
 	}
 }
@@ -53,11 +55,11 @@ func TestSaveEventsDedupes(t *testing.T) {
 		{BlockNumber: 1, TxHash: "0xa", LogIndex: 0, Address: "0xc", Topics: []string{"0xt"}, Data: "0x"},
 		{BlockNumber: 1, TxHash: "0xa", LogIndex: 1, Address: "0xc", Topics: []string{"0xt"}, Data: "0x"},
 	}
-	if err := s.SaveEvents(ctx, events); err != nil {
+	if err := s.SaveEvents(ctx, defaultSrc, events); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	// Re-saving the same events must be a no-op (PRIMARY KEY conflict ignored).
-	if err := s.SaveEvents(ctx, events); err != nil {
+	if err := s.SaveEvents(ctx, defaultSrc, events); err != nil {
 		t.Fatalf("save again: %v", err)
 	}
 
@@ -72,7 +74,7 @@ func TestSaveEventsDedupes(t *testing.T) {
 
 func TestSaveEventsEmpty(t *testing.T) {
 	s := newTestStore(t)
-	if err := s.SaveEvents(context.Background(), nil); err != nil {
+	if err := s.SaveEvents(context.Background(), defaultSrc, nil); err != nil {
 		t.Fatalf("empty save: %v", err)
 	}
 }
@@ -81,14 +83,14 @@ func TestBlockHashRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 
-	if err := s.RecordBlockHash(ctx, 10, "0xh10", "0xh9", 64); err != nil {
+	if err := s.RecordBlockHash(ctx, defaultSrc, 10, "0xh10", "0xh9", 64); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if err := s.RecordBlockHash(ctx, 11, "0xh11", "0xh10", 64); err != nil {
+	if err := s.RecordBlockHash(ctx, defaultSrc, 11, "0xh11", "0xh10", 64); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
-	got, ok, err := s.BlockHashAt(ctx, 10)
+	got, ok, err := s.BlockHashAt(ctx, defaultSrc, 10)
 	if err != nil {
 		t.Fatalf("BlockHashAt: %v", err)
 	}
@@ -96,7 +98,7 @@ func TestBlockHashRoundTrip(t *testing.T) {
 		t.Fatalf("BlockHashAt(10) = %+v, ok=%v", got, ok)
 	}
 
-	_, ok, err = s.BlockHashAt(ctx, 999)
+	_, ok, err = s.BlockHashAt(ctx, defaultSrc, 999)
 	if err != nil {
 		t.Fatalf("BlockHashAt missing: %v", err)
 	}
@@ -104,7 +106,7 @@ func TestBlockHashRoundTrip(t *testing.T) {
 		t.Fatal("missing block should return ok=false")
 	}
 
-	recent, err := s.RecentBlockHashes(ctx, 10)
+	recent, err := s.RecentBlockHashes(ctx, defaultSrc, 10)
 	if err != nil {
 		t.Fatalf("RecentBlockHashes: %v", err)
 	}
@@ -119,11 +121,11 @@ func TestBlockHashRecentOrderingAndCap(t *testing.T) {
 
 	const capDepth = 10
 	for n := uint64(1); n <= 100; n++ {
-		if err := s.RecordBlockHash(ctx, n, "h", "p", capDepth); err != nil {
+		if err := s.RecordBlockHash(ctx, defaultSrc, n, "h", "p", capDepth); err != nil {
 			t.Fatalf("record %d: %v", n, err)
 		}
 	}
-	recent, err := s.RecentBlockHashes(ctx, 20)
+	recent, err := s.RecentBlockHashes(ctx, defaultSrc, 20)
 	if err != nil {
 		t.Fatalf("RecentBlockHashes: %v", err)
 	}
@@ -150,6 +152,17 @@ func TestOpenSQLiteEnablesWAL(t *testing.T) {
 	}
 }
 
+func TestOpenSQLiteStampsUserVersionOnFreshDB(t *testing.T) {
+	s := newTestStore(t)
+	var v int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	if v != SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, SchemaVersion)
+	}
+}
+
 func strPtr(s string) *string { return &s }
 func u64Ptr(u uint64) *uint64 { return &u }
 
@@ -169,7 +182,7 @@ func seedQueryEvents(t *testing.T, s *SQLite) {
 		{BlockNumber: 104, TxHash: "0xt104a", LogIndex: 0, Address: "0xA", Topics: []string{"0xT0a"}, Data: "0x"},
 		{BlockNumber: 104, TxHash: "0xt104b", LogIndex: 1, Address: "0xB", Topics: []string{"0xT0b"}, Data: "0x"},
 	}
-	if err := s.SaveEvents(ctx, events); err != nil {
+	if err := s.SaveEvents(ctx, defaultSrc, events); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 }
@@ -223,7 +236,7 @@ func TestQueryLimitClamping(t *testing.T) {
 			Data:        "0x",
 		})
 	}
-	if err := s.SaveEvents(ctx, events); err != nil {
+	if err := s.SaveEvents(ctx, defaultSrc, events); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -258,7 +271,7 @@ func TestQueryCursorPagination(t *testing.T) {
 	for n := uint64(201); n <= 250; n++ {
 		events = append(events, Event{BlockNumber: n, TxHash: fmt.Sprintf("0xtc%d", n), LogIndex: 0, Address: "0xC", Topics: []string{"0xT"}, Data: "0x"})
 	}
-	if err := s.SaveEvents(ctx, events); err != nil {
+	if err := s.SaveEvents(ctx, defaultSrc, events); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -332,7 +345,7 @@ func TestQueryPostFilterCursorPagination(t *testing.T) {
 			wantHashes[tx] = true
 		}
 	}
-	if err := s.SaveEvents(ctx, events); err != nil {
+	if err := s.SaveEvents(ctx, defaultSrc, events); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -396,19 +409,19 @@ func TestRewindToDeletesEventsAndHashesAndCheckpoint(t *testing.T) {
 			Data:        "0x",
 		})
 	}
-	if err := s.SaveEvents(ctx, events); err != nil {
+	if err := s.SaveEvents(ctx, defaultSrc, events); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	for n := uint64(1); n <= 10; n++ {
-		if err := s.RecordBlockHash(ctx, n, "0xh", "0xp", 64); err != nil {
+		if err := s.RecordBlockHash(ctx, defaultSrc, n, "0xh", "0xp", 64); err != nil {
 			t.Fatalf("record %d: %v", n, err)
 		}
 	}
-	if err := s.SetCheckpoint(ctx, 11); err != nil {
+	if err := s.SetCheckpoint(ctx, defaultSrc, 11); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
 
-	if err := s.RewindTo(ctx, 5); err != nil {
+	if err := s.RewindTo(ctx, defaultSrc, 5); err != nil {
 		t.Fatalf("rewind: %v", err)
 	}
 
@@ -426,7 +439,7 @@ func TestRewindToDeletesEventsAndHashesAndCheckpoint(t *testing.T) {
 		t.Fatalf("events count = %d, want 4 (blocks 1..4)", n)
 	}
 
-	recent, err := s.RecentBlockHashes(ctx, 100)
+	recent, err := s.RecentBlockHashes(ctx, defaultSrc, 100)
 	if err != nil {
 		t.Fatalf("recent: %v", err)
 	}
@@ -434,11 +447,115 @@ func TestRewindToDeletesEventsAndHashesAndCheckpoint(t *testing.T) {
 		t.Fatalf("hashes count = %d, want 4 (blocks 1..4)", len(recent))
 	}
 
-	got, err := s.Checkpoint(ctx)
+	got, err := s.Checkpoint(ctx, defaultSrc)
 	if err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
 	if got != 5 {
 		t.Fatalf("checkpoint = %d, want 5", got)
+	}
+}
+
+// TestSourceIsolation pins that two sources writing into the same DB don't
+// leak rows into each other's queries / checkpoints / block_hashes. The new
+// (source, …) PKs and the SQL pushdown of filter.Source carry the load.
+func TestSourceIsolation(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	aEvents := []Event{
+		{BlockNumber: 10, TxHash: "0xta1", LogIndex: 0, Address: "0xA", Topics: []string{"0xT"}, Data: "0x"},
+		{BlockNumber: 11, TxHash: "0xta2", LogIndex: 0, Address: "0xA", Topics: []string{"0xT"}, Data: "0x"},
+	}
+	bEvents := []Event{
+		{BlockNumber: 10, TxHash: "0xtb1", LogIndex: 0, Address: "0xB", Topics: []string{"0xT"}, Data: "0x"},
+		{BlockNumber: 12, TxHash: "0xtb2", LogIndex: 0, Address: "0xB", Topics: []string{"0xT"}, Data: "0x"},
+	}
+	if err := s.SaveEvents(ctx, "a", aEvents); err != nil {
+		t.Fatalf("save a: %v", err)
+	}
+	if err := s.SaveEvents(ctx, "b", bEvents); err != nil {
+		t.Fatalf("save b: %v", err)
+	}
+	if err := s.SetCheckpoint(ctx, "a", 100); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.SetCheckpoint(ctx, "b", 200); err != nil {
+		t.Fatalf("set b: %v", err)
+	}
+
+	src := "a"
+	rows, _, err := s.Query(ctx, QueryFilter{Source: &src})
+	if err != nil {
+		t.Fatalf("query a: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("query a: %d rows, want 2", len(rows))
+	}
+	for _, e := range rows {
+		if e.Source != "a" {
+			t.Fatalf("query a returned source %q", e.Source)
+		}
+	}
+
+	ca, _ := s.Checkpoint(ctx, "a")
+	cb, _ := s.Checkpoint(ctx, "b")
+	if ca != 100 || cb != 200 {
+		t.Fatalf("checkpoints a=%d b=%d, want 100/200", ca, cb)
+	}
+
+	// Block hashes isolated: record block 10 under both sources with different hashes.
+	if err := s.RecordBlockHash(ctx, "a", 10, "0xA10", "0xA9", 64); err != nil {
+		t.Fatalf("record a: %v", err)
+	}
+	if err := s.RecordBlockHash(ctx, "b", 10, "0xB10", "0xB9", 64); err != nil {
+		t.Fatalf("record b: %v", err)
+	}
+	ga, _, _ := s.BlockHashAt(ctx, "a", 10)
+	gb, _, _ := s.BlockHashAt(ctx, "b", 10)
+	if ga.Hash != "0xA10" || gb.Hash != "0xB10" {
+		t.Fatalf("block hashes leaked: a=%s b=%s", ga.Hash, gb.Hash)
+	}
+
+	// RewindTo on "a" must not touch "b".
+	if err := s.RewindTo(ctx, "a", 11); err != nil {
+		t.Fatalf("rewind a: %v", err)
+	}
+	rowsAfter, _, _ := s.Query(ctx, QueryFilter{})
+	srcCounts := map[string]int{}
+	for _, e := range rowsAfter {
+		srcCounts[e.Source]++
+	}
+	if srcCounts["b"] != 2 {
+		t.Fatalf("source b lost rows after a-rewind: counts=%+v", srcCounts)
+	}
+}
+
+func TestCheckpointsReturnsAll(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.SetCheckpoint(ctx, "a", 10); err != nil {
+		t.Fatalf("set a: %v", err)
+	}
+	if err := s.SetCheckpoint(ctx, "b", 20); err != nil {
+		t.Fatalf("set b: %v", err)
+	}
+	if err := s.SetCheckpoint(ctx, "c", 30); err != nil {
+		t.Fatalf("set c: %v", err)
+	}
+
+	got, err := s.Checkpoints(ctx)
+	if err != nil {
+		t.Fatalf("Checkpoints: %v", err)
+	}
+	want := map[string]uint64{"a": 10, "b": 20, "c": 30}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("got[%q]=%d, want %d", k, got[k], v)
+		}
 	}
 }

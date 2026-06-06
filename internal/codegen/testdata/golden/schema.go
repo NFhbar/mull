@@ -7,23 +7,25 @@ import (
 )
 
 const SchemaDDL = `CREATE TABLE IF NOT EXISTS events_erc20_approval (
+    source       TEXT    NOT NULL,
     block_number INTEGER NOT NULL,
     tx_hash      TEXT    NOT NULL,
     log_index    INTEGER NOT NULL,
     "owner" TEXT NOT NULL,
     "spender" TEXT NOT NULL,
     "value" TEXT NOT NULL,
-    PRIMARY KEY (tx_hash, log_index)
+    PRIMARY KEY (source, tx_hash, log_index)
 );
 
 CREATE TABLE IF NOT EXISTS events_erc20_transfer (
+    source       TEXT    NOT NULL,
     block_number INTEGER NOT NULL,
     tx_hash      TEXT    NOT NULL,
     log_index    INTEGER NOT NULL,
     "from" TEXT NOT NULL,
     "to" TEXT NOT NULL,
     "value" TEXT NOT NULL,
-    PRIMARY KEY (tx_hash, log_index)
+    PRIMARY KEY (source, tx_hash, log_index)
 );`
 
 func ApplySchema(ctx context.Context, db *sql.DB) error {

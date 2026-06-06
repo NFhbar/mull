@@ -24,6 +24,7 @@ func TestCatchUpChunksAndCheckpoints(t *testing.T) {
 		},
 	}
 	idx := New(r, st, Options{
+		Source:    "test",
 		Contract:  "0xc",
 		ChunkSize: 10,
 		Logger:    quietLogger(),
@@ -77,6 +78,7 @@ func TestCatchUpConcurrentOrderedCommits(t *testing.T) {
 		},
 	}
 	idx := New(r, st, Options{
+		Source:      "test",
 		Contract:    "0xc",
 		ChunkSize:   10,
 		Concurrency: 4,
@@ -175,6 +177,7 @@ func TestCatchUpConcurrentChunkFailureCancels(t *testing.T) {
 		failDelay: 20 * time.Millisecond,
 	}
 	idx := New(r, st, Options{
+		Source:      "test",
 		Contract:    "0xc",
 		ChunkSize:   10,
 		Concurrency: 3,
@@ -240,6 +243,7 @@ func TestCatchUpRespectsStartBlock(t *testing.T) {
 		},
 	}
 	idx := New(r, st, Options{
+		Source:       "test",
 		ChunkSize:    100,
 		StartBlock:   3,
 		PollInterval: time.Hour,
@@ -264,6 +268,7 @@ func TestCatchUpRespectsStartBlock(t *testing.T) {
 func newReorgIdx(t *testing.T, r *fakeRPC, st *fakeStore, depth uint64) *Indexer {
 	t.Helper()
 	return New(r, st, Options{
+		Source:      "test",
 		Contract:    "0xc",
 		ChunkSize:   10,
 		Concurrency: 1,
@@ -392,6 +397,7 @@ func TestReconcileHeadFansRewindToSinks(t *testing.T) {
 	typedSink := &fakeSink{id: "typed", topic0: topicSig}
 	wildcardSink := &fakeSink{id: "wildcard"}
 	idx := New(r, st, Options{
+		Source:      "test",
 		Contract:    "0xc",
 		ChunkSize:   10,
 		Concurrency: 1,
@@ -440,6 +446,7 @@ func TestReconcileHeadSinkRewindErrorPropagates(t *testing.T) {
 	sinkErr := errors.New("typed table locked")
 	sink := &fakeSink{id: "broken", rewindErr: sinkErr}
 	idx := New(r, st, Options{
+		Source:      "test",
 		Contract:    "0xc",
 		ChunkSize:   10,
 		Concurrency: 1,
@@ -545,11 +552,12 @@ func TestRunReindexesRewoundRangeAfterReorg(t *testing.T) {
 		return out
 	}
 	// Pre-seed checkpoint at 195 so cycle 1 indexes 195..200.
-	_ = st.SetCheckpoint(context.Background(), 195)
+	_ = st.SetCheckpoint(context.Background(), "test", 195)
 	// Pre-populate block_hashes so backfill no-ops.
-	_ = st.RecordBlockHash(context.Background(), 194, "0xA194", "0xA193", 64)
+	_ = st.RecordBlockHash(context.Background(), "test", 194, "0xA194", "0xA193", 64)
 
 	idx := New(r, st, Options{
+		Source:       "test",
 		Contract:     "0xc",
 		ChunkSize:    100,
 		PollInterval: 5 * time.Millisecond,
@@ -628,6 +636,7 @@ func TestBackfillBlockHashesOnColdResume(t *testing.T) {
 	r := &fakeRPC{head: 200, headers: headers}
 
 	idx := New(r, st, Options{
+		Source:       "test",
 		Contract:     "0xc",
 		ChunkSize:    100,
 		PollInterval: time.Hour,
@@ -681,6 +690,7 @@ func TestRunMakesProgressWhenStartBlockFarBehindHead(t *testing.T) {
 		},
 	}
 	idx := New(r, st, Options{
+		Source:       "test",
 		Contract:     "0xc",
 		ChunkSize:    50,
 		StartBlock:   10,
@@ -727,6 +737,7 @@ func TestBackfillBlockHashesSwallowsMidWalkRPCError(t *testing.T) {
 	r := &fakeRPC{head: 100, headers: headers}
 
 	idx := New(r, st, Options{
+		Source:     "test",
 		Contract:   "0xc",
 		ReorgDepth: 8,
 		Logger:     quietLogger(),
@@ -767,7 +778,7 @@ func (s *fakeSink) Handle(_ context.Context, e store.Event) error {
 	s.handled = append(s.handled, e)
 	return nil
 }
-func (s *fakeSink) RewindTo(_ context.Context, block uint64) error {
+func (s *fakeSink) RewindTo(_ context.Context, _ string, block uint64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.rewindErr != nil {
@@ -789,6 +800,7 @@ func TestRun_FansOutToSinks(t *testing.T) {
 	sinkA := &fakeSink{id: "a"}
 	sinkB := &fakeSink{id: "b"}
 	idx := New(r, st, Options{
+		Source:    "test",
 		Contract:  "0xc",
 		ChunkSize: 10,
 		Logger:    quietLogger(),
@@ -826,6 +838,7 @@ func TestRun_SinkErrorAbortsRun(t *testing.T) {
 	sinkErr := errors.New("sink boom")
 	sink := &fakeSink{id: "boom", failOn: "0xtx-11", failErr: sinkErr}
 	idx := New(r, st, Options{
+		Source:    "test",
 		Contract:  "0xc",
 		ChunkSize: 10,
 		Logger:    quietLogger(),
@@ -872,6 +885,7 @@ func TestRun_ExitsCleanlyOnHeadChannelClose(t *testing.T) {
 	}
 	src := &stubHeadSource{latest: rpc.Header{Number: 10, Hash: "0xh10", ParentHash: "0xh9"}}
 	idx := New(r, st, Options{
+		Source:     "test",
 		Contract:   "0xc",
 		ChunkSize:  100,
 		StartBlock: 0,
