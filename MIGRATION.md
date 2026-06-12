@@ -196,7 +196,8 @@ cross-chain queries from typed tables would be ambiguous.
 on-disk column shape no longer matches the committed codegen output
 (stamped in `gen_schema_versions`), including tables that were dropped by
 hand under the manual remedy above. Per drifted table, inside a single
-transaction: `DROP TABLE`, recreate from the fresh generated DDL, restamp
+transaction: `DROP TABLE`, recreate just that table from its fresh
+generated DDL statement (no sibling side effects), restamp
 the signature, then replay every matching row from the raw `events` table
 through the generated sink in `(block_number, log_index, source)` order.
 Generated sinks use `INSERT OR IGNORE` and decoders are pure functions of

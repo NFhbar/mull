@@ -364,10 +364,9 @@ func TestRebuildDriftedTables_RollbackOnSinkFailure(t *testing.T) {
 }
 
 // TestRebuildDriftedTables_MultipleAbsentTablesAllReplayed pins the
-// multi-table contract: rebuilding the first absent table (sorted order)
-// executes the full DDL, which creates the sibling empty at the fresh
-// shape — the up-front drift snapshot must still drop, replay, and restamp
-// that sibling rather than skipping it on a now-matching signature.
+// multi-table contract: with two absent tables, both must be dropped,
+// replayed, and restamped — rebuilding the first (sorted order) must not
+// cause the sibling to be skipped on a now-matching signature.
 func TestRebuildDriftedTables_MultipleAbsentTablesAllReplayed(t *testing.T) {
 	s := openRebuildStore(t)
 	ctx := context.Background()
@@ -400,6 +399,75 @@ func TestRebuildDriftedTables_MultipleAbsentTablesAllReplayed(t *testing.T) {
 		if !ok || stamped != rebuildSig {
 			t.Fatalf("%s stamp = %q (present=%v), want %q", table, stamped, ok, rebuildSig)
 		}
+	}
+}
+
+// TestRebuildDriftedTables_FailureThenRerunRebuildsRemainder pins the
+// failure-path contract: rebuilding one table must not durably create an
+// absent sibling. Approval (first in sorted order) commits, then transfer's
+// sink fails mid-replay; had approval's rebuild created transfer empty at
+// the fresh shape, the re-run's drift scan would see a matching signature
+// and silently skip it — losing transfer's history.
+func TestRebuildDriftedTables_FailureThenRerunRebuildsRemainder(t *testing.T) {
+	s := openRebuildStore(t)
+	ctx := context.Background()
+
+	if err := s.SaveEvents(ctx, "a", []Event{
+		{Source: "a", BlockNumber: 1, TxHash: "0x1", LogIndex: 0, Address: "0xC", Topics: []string{transferTopic0}, Data: "t1"},
+		{Source: "a", BlockNumber: 2, TxHash: "0x2", LogIndex: 0, Address: "0xC", Topics: []string{approvalTopic0}, Data: "a1"},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// Both tables absent, so both count as drifted. Approval's replay handles
+	// one matching event (calls=1); transfer's first matching call is calls=2,
+	// where failAt fires.
+	var calls int
+	rebuilt, err := s.RebuildDriftedTables(ctx, rebuildTestSpec(&calls, 2))
+	if err == nil {
+		t.Fatal("expected transfer sink failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "rebuild events_test_transfer") {
+		t.Fatalf("error %q missing table context", err)
+	}
+	if !reflect.DeepEqual(rebuilt, []string{"events_test_approval"}) {
+		t.Fatalf("rebuilt = %v, want [events_test_approval]", rebuilt)
+	}
+
+	// Transfer's failed rebuild rolled back, and approval's committed rebuild
+	// must not have created transfer as a side effect: still absent, still
+	// unstamped — i.e. still drifted on a re-run.
+	sig, err := tableColumnSignature(ctx, s.db, "events_test_transfer")
+	if err != nil {
+		t.Fatalf("signature: %v", err)
+	}
+	if sig != "" {
+		t.Fatalf("transfer exists after failed rebuild (signature %q), want absent", sig)
+	}
+	if stamped, ok := stampedSignature(t, s.db, "events_test_transfer"); ok {
+		t.Fatalf("transfer stamped after failed rebuild: %q", stamped)
+	}
+
+	var rerunCalls int
+	rebuilt, err = s.RebuildDriftedTables(ctx, rebuildTestSpec(&rerunCalls, 0))
+	if err != nil {
+		t.Fatalf("re-run: %v", err)
+	}
+	if !reflect.DeepEqual(rebuilt, []string{"events_test_transfer"}) {
+		t.Fatalf("re-run rebuilt = %v, want [events_test_transfer]", rebuilt)
+	}
+	got := readTypedRows(t, s, "events_test_transfer")
+	want := []typedRow{{Source: "a", Block: 1, TxHash: "0x1", LogIdx: 0, Value: "t1"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("transfer rows after re-run = %+v, want %+v", got, want)
+	}
+	stamped, ok := stampedSignature(t, s.db, "events_test_transfer")
+	if !ok || stamped != rebuildSig {
+		t.Fatalf("transfer stamp after re-run = %q (present=%v), want %q", stamped, ok, rebuildSig)
+	}
+	approval := readTypedRows(t, s, "events_test_approval")
+	if len(approval) != 1 || approval[0].Value != "a1" {
+		t.Fatalf("approval rows = %+v, want the committed a1 row", approval)
 	}
 }
 

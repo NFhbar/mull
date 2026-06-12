@@ -11,8 +11,9 @@ import (
 // RebuildSpec carries the generated artifacts the rebuild engine needs,
 // parameterized so the engine is testable without running codegen:
 //   - DDL is the full generated SchemaDDL (CREATE TABLE IF NOT EXISTS per
-//     table — re-executing it recreates only a dropped table and no-ops
-//     the rest).
+//     table). The rebuild engine extracts and executes only the statement
+//     for the table being rebuilt — executing the full DDL would durably
+//     create absent sibling tables as a side effect (see rebuildTable).
 //   - Signatures maps each generated table to its expected column
 //     signature (generated SchemaVersions).
 //   - Topics maps each generated table to the topic0 of the event feeding
@@ -43,10 +44,12 @@ var rebuildTableName = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 // committed rebuild loses nothing. Tables stamped in gen_schema_versions
 // but absent from spec.Signatures (orphans) are never touched.
 //
-// The drifted set is snapshotted before any rebuild runs: rebuilding one
-// table executes the full spec.DDL, which creates any *absent* sibling
-// table empty at the fresh shape — an interleaved signature check would
-// then see a match and silently skip that sibling's replay.
+// The drifted set is snapshotted before any rebuild runs, and each rebuild
+// executes only its own table's CREATE statement extracted from spec.DDL.
+// Both guards target the same hazard: creating an absent sibling empty at
+// the fresh shape would make a later signature scan — this loop's, or a
+// re-run's after a mid-replay failure (rebuilds commit per table) — see a
+// match and silently skip that sibling's replay, losing its history.
 //
 // Returns the names of the tables rebuilt, in sorted order.
 func (s *SQLite) RebuildDriftedTables(ctx context.Context, spec RebuildSpec) ([]string, error) {
@@ -85,6 +88,10 @@ func (s *SQLite) rebuildTable(ctx context.Context, spec RebuildSpec, table strin
 	if !ok {
 		return fmt.Errorf("no topic0 mapping for table")
 	}
+	ddl, err := tableDDLStatement(spec.DDL, table)
+	if err != nil {
+		return err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -106,8 +113,8 @@ func (s *SQLite) rebuildTable(ctx context.Context, spec RebuildSpec, table strin
 	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS "`+table+`"`); err != nil {
 		return fmt.Errorf("drop %s: %w", table, err)
 	}
-	if _, err := tx.ExecContext(ctx, spec.DDL); err != nil {
-		return fmt.Errorf("recreate tables: %w", err)
+	if _, err := tx.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("recreate %s: %w", table, err)
 	}
 	if _, err := tx.ExecContext(ctx, createGenSchemaVersionsDDL); err != nil {
 		return fmt.Errorf("create gen_schema_versions: %w", err)
@@ -121,6 +128,20 @@ func (s *SQLite) rebuildTable(ctx context.Context, spec RebuildSpec, table strin
 		return fmt.Errorf("replay %s: %w", table, err)
 	}
 	return tx.Commit()
+}
+
+// tableDDLStatement extracts the one CREATE TABLE statement for table from
+// the full generated DDL, so a rebuild has no sibling side effects. The
+// codegen template emits each statement starting at column 0 and terminated
+// by ");" at column 0, and table is pre-validated against rebuildTableName
+// (alphanumeric + underscore only), so the interpolation is regex-safe.
+func tableDDLStatement(ddl, table string) (string, error) {
+	re := regexp.MustCompile(`(?ms)^CREATE TABLE IF NOT EXISTS ` + table + ` \(.*?^\);`)
+	stmt := re.FindString(ddl)
+	if stmt == "" {
+		return "", fmt.Errorf("no CREATE TABLE statement for %s in DDL", table)
+	}
+	return stmt, nil
 }
 
 // eventsByTopic0 streams raw events whose topic0 matches, in the canonical
