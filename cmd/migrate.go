@@ -93,6 +93,12 @@ func runMigrate(ctx context.Context) error {
 	defer st.Close()
 	rebuilt, err := gen.RebuildDrifted(ctx, st)
 	if err != nil {
+		// Rebuilds commit per table, so earlier tables are already durable;
+		// tell the operator so a re-run's smaller rebuild list isn't a surprise.
+		if len(rebuilt) > 0 {
+			fmt.Fprintf(os.Stderr, "note: %d typed table(s) already rebuilt and committed before the failure: %s; a re-run will rebuild only the remainder\n",
+				len(rebuilt), strings.Join(rebuilt, ", "))
+		}
 		return fmt.Errorf("rebuild drifted tables: %w", err)
 	}
 

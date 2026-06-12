@@ -43,6 +43,11 @@ var rebuildTableName = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 // committed rebuild loses nothing. Tables stamped in gen_schema_versions
 // but absent from spec.Signatures (orphans) are never touched.
 //
+// The drifted set is snapshotted before any rebuild runs: rebuilding one
+// table executes the full spec.DDL, which creates any *absent* sibling
+// table empty at the fresh shape — an interleaved signature check would
+// then see a match and silently skip that sibling's replay.
+//
 // Returns the names of the tables rebuilt, in sorted order.
 func (s *SQLite) RebuildDriftedTables(ctx context.Context, spec RebuildSpec) ([]string, error) {
 	tables := make([]string, 0, len(spec.Signatures))
@@ -51,15 +56,19 @@ func (s *SQLite) RebuildDriftedTables(ctx context.Context, spec RebuildSpec) ([]
 	}
 	sort.Strings(tables)
 
-	var rebuilt []string
+	var drifted []string
 	for _, table := range tables {
 		actual, err := tableColumnSignature(ctx, s.db, table)
 		if err != nil {
-			return rebuilt, err
+			return nil, err
 		}
-		if actual == spec.Signatures[table] {
-			continue
+		if actual != spec.Signatures[table] {
+			drifted = append(drifted, table)
 		}
+	}
+
+	var rebuilt []string
+	for _, table := range drifted {
 		if err := s.rebuildTable(ctx, spec, table); err != nil {
 			return rebuilt, fmt.Errorf("rebuild %s: %w", table, err)
 		}

@@ -205,6 +205,11 @@ have written — history included. A failure mid-rebuild rolls back to the
 prior on-disk state. Tables stamped in `gen_schema_versions` but absent
 from the generated set (orphans) are never touched.
 
+Each drifted table's replay scans the full raw `events` table once — the
+topic0 predicate can't use an index (same caveat as bare `?topic0=`
+queries) — so with several drifted tables and a large event history,
+expect the rebuild step to take proportionally longer.
+
 The rebuild only runs through `mull migrate` — `mull index` still fails
 loudly on drift and never drops data on its own.
 

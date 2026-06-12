@@ -363,6 +363,46 @@ func TestRebuildDriftedTables_RollbackOnSinkFailure(t *testing.T) {
 	}
 }
 
+// TestRebuildDriftedTables_MultipleAbsentTablesAllReplayed pins the
+// multi-table contract: rebuilding the first absent table (sorted order)
+// executes the full DDL, which creates the sibling empty at the fresh
+// shape — the up-front drift snapshot must still drop, replay, and restamp
+// that sibling rather than skipping it on a now-matching signature.
+func TestRebuildDriftedTables_MultipleAbsentTablesAllReplayed(t *testing.T) {
+	s := openRebuildStore(t)
+	ctx := context.Background()
+
+	if err := s.SaveEvents(ctx, "a", []Event{
+		{Source: "a", BlockNumber: 1, TxHash: "0x1", LogIndex: 0, Address: "0xC", Topics: []string{transferTopic0}, Data: "t1"},
+		{Source: "a", BlockNumber: 2, TxHash: "0x2", LogIndex: 0, Address: "0xC", Topics: []string{approvalTopic0}, Data: "a1"},
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	var calls int
+	rebuilt, err := s.RebuildDriftedTables(ctx, rebuildTestSpec(&calls, 0))
+	if err != nil {
+		t.Fatalf("RebuildDriftedTables: %v", err)
+	}
+	if !reflect.DeepEqual(rebuilt, []string{"events_test_approval", "events_test_transfer"}) {
+		t.Fatalf("rebuilt = %v, want both tables", rebuilt)
+	}
+
+	for table, want := range map[string]typedRow{
+		"events_test_approval": {Source: "a", Block: 2, TxHash: "0x2", LogIdx: 0, Value: "a1"},
+		"events_test_transfer": {Source: "a", Block: 1, TxHash: "0x1", LogIdx: 0, Value: "t1"},
+	} {
+		got := readTypedRows(t, s, table)
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("%s rows = %+v, want [%+v]", table, got, want)
+		}
+		stamped, ok := stampedSignature(t, s.db, table)
+		if !ok || stamped != rebuildSig {
+			t.Fatalf("%s stamp = %q (present=%v), want %q", table, stamped, ok, rebuildSig)
+		}
+	}
+}
+
 func TestRebuildDriftedTables_MissingSinkErrors(t *testing.T) {
 	s := openRebuildStore(t)
 	ctx := context.Background()
