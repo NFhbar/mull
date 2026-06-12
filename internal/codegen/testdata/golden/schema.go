@@ -36,6 +36,11 @@ var SchemaVersions = map[string]string{
 	"events_erc20_transfer": "source:TEXT,block_number:INTEGER,tx_hash:TEXT,log_index:INTEGER,from:TEXT,to:TEXT,value:TEXT",
 }
 
+var SchemaTopics = map[string]string{
+	"events_erc20_approval": ApprovalEventSig,
+	"events_erc20_transfer": TransferEventSig,
+}
+
 func ApplySchema(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	if SchemaDDL == "" {
 		return nil
@@ -51,4 +56,13 @@ func ApplySchema(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 		logger.Warn("typed table has a stamped signature but is not in the generated set; leaving in place", "table", t)
 	}
 	return nil
+}
+
+func RebuildDrifted(ctx context.Context, st *store.SQLite) ([]string, error) {
+	return st.RebuildDriftedTables(ctx, store.RebuildSpec{
+		DDL:        SchemaDDL,
+		Signatures: SchemaVersions,
+		Topics:     SchemaTopics,
+		NewSinks:   NewSinks,
+	})
 }

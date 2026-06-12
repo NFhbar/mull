@@ -72,10 +72,14 @@ distinct aliases.
   *adding* new event tables to an existing deployment. It silently no-ops
   on shape changes, so if you regenerate an event with a different field
   set (e.g. ABI gains an indexed `nonce` arg) the typed table on disk
-  keeps the old columns and the next matching event aborts the indexer
-  with `no such column: <name>`. mull has no migration tool by design;
-  drop or migrate the affected `events_<alias>_<event>` table manually
-  before resuming, then `mull index` rebuilds it via codegen-emitted DDL.
+  keeps the old columns; startup detects this via the signature stamped
+  in `gen_schema_versions` and fails loudly. The remedy is `mull migrate`:
+  it rebuilds each drifted `events_<alias>_<event>` table — drop, recreate
+  from the fresh DDL, restamp, then replay the table's full history from
+  the raw `events` table — one transaction per table, so a failure leaves
+  the old state intact. Dropping the table by hand remains a fallback;
+  `mull migrate` detects the absent table and rebuilds it (history
+  included) the same way.
 - *Atomicity* — the committer goroutine writes raw events, runs each sink,
   then advances the checkpoint in separate transactions. If `mull index`
   crashes mid-chunk, the raw `events` row, the per-event typed rows, and
