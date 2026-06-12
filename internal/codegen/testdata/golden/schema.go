@@ -4,6 +4,9 @@ package gen
 import (
 	"context"
 	"database/sql"
+	"log/slog"
+
+	"github.com/NFhbar/mull/internal/store"
 )
 
 const SchemaDDL = `CREATE TABLE IF NOT EXISTS events_erc20_approval (
@@ -28,10 +31,24 @@ CREATE TABLE IF NOT EXISTS events_erc20_transfer (
     PRIMARY KEY (source, tx_hash, log_index)
 );`
 
-func ApplySchema(ctx context.Context, db *sql.DB) error {
+var SchemaVersions = map[string]string{
+	"events_erc20_approval": "source:TEXT,block_number:INTEGER,tx_hash:TEXT,log_index:INTEGER,owner:TEXT,spender:TEXT,value:TEXT",
+	"events_erc20_transfer": "source:TEXT,block_number:INTEGER,tx_hash:TEXT,log_index:INTEGER,from:TEXT,to:TEXT,value:TEXT",
+}
+
+func ApplySchema(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	if SchemaDDL == "" {
 		return nil
 	}
-	_, err := db.ExecContext(ctx, SchemaDDL)
-	return err
+	if _, err := db.ExecContext(ctx, SchemaDDL); err != nil {
+		return err
+	}
+	orphans, err := store.EnsureSchemaSignatures(ctx, db, SchemaVersions)
+	if err != nil {
+		return err
+	}
+	for _, t := range orphans {
+		logger.Warn("typed table has a stamped signature but is not in the generated set; leaving in place", "table", t)
+	}
+	return nil
 }

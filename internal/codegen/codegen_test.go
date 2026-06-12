@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
 )
 
 var updateGolden = flag.Bool("update", false, "regenerate testdata/golden/ from current codegen output")
@@ -176,6 +178,33 @@ func TestGenerate_IndexedBytesN_NoMissingHelper(t *testing.T) {
 	}
 	if !bytes.Contains(helpers, []byte("func decodeFixedBytesTopic(")) {
 		t.Fatalf("generated helpers.go missing decodeFixedBytesTopic definition:\n%s", helpers)
+	}
+}
+
+func TestPlanEvent_ColumnSignature(t *testing.T) {
+	abiJSON := `[
+		{
+			"anonymous": false,
+			"inputs": [
+				{"indexed": true, "name": "from", "type": "address"},
+				{"indexed": true, "name": "to", "type": "address"},
+				{"indexed": false, "name": "value", "type": "uint256"}
+			],
+			"name": "Transfer",
+			"type": "event"
+		}
+	]`
+	parsed, err := abi.JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		t.Fatalf("parse abi: %v", err)
+	}
+	p, err := planEvent(parsed.Events["Transfer"], "erc20")
+	if err != nil {
+		t.Fatalf("planEvent: %v", err)
+	}
+	want := "source:TEXT,block_number:INTEGER,tx_hash:TEXT,log_index:INTEGER,from:TEXT,to:TEXT,value:TEXT"
+	if p.Signature != want {
+		t.Fatalf("Signature = %q, want %q", p.Signature, want)
 	}
 }
 
