@@ -35,6 +35,7 @@ type eventPlan struct {
 	TableName      string
 	SigText        string
 	SigHash        string
+	Signature      string
 	IndexedArgs    []fieldPlan
 	NonIndexedArgs []fieldPlan
 	AllFields      []fieldPlan
@@ -172,7 +173,21 @@ func planEvent(ev abi.Event, alias string) (eventPlan, error) {
 			p.HasCommon = true
 		}
 	}
+	p.Signature = columnSignature(p.AllFields)
 	return p, nil
+}
+
+// columnSignature renders the table's full column shape in DDL order as a
+// verbatim "colname:SQLTYPE" list — byte-identical to a signature derived
+// from PRAGMA table_info, so drift detection survives cosmetic DDL churn
+// that a whole-DDL hash would falsely flag.
+func columnSignature(fields []fieldPlan) string {
+	parts := make([]string, 0, len(fields)+4)
+	parts = append(parts, "source:TEXT", "block_number:INTEGER", "tx_hash:TEXT", "log_index:INTEGER")
+	for _, f := range fields {
+		parts = append(parts, f.ColName+":"+f.SQLType)
+	}
+	return strings.Join(parts, ",")
 }
 
 func eventSig(ev abi.Event) string {

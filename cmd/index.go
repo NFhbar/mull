@@ -56,7 +56,7 @@ func runIndex(ctx context.Context) error {
 	}
 	defer st.Close()
 
-	if err := gen.ApplySchema(ctx, st.DB()); err != nil {
+	if err := gen.ApplySchema(ctx, st.DB(), logger); err != nil {
 		return fmt.Errorf("apply generated schema: %w", err)
 	}
 	// Typed-event tables are global to the binary; sinks themselves are

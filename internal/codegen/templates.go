@@ -10,6 +10,9 @@ package gen
 import (
 	"context"
 	"database/sql"
+	"log/slog"
+
+	"github.com/NFhbar/mull/internal/store"
 )
 
 const SchemaDDL = ` + "`" + `{{range $i, $e := .}}{{if $i}}
@@ -23,12 +26,27 @@ const SchemaDDL = ` + "`" + `{{range $i, $e := .}}{{if $i}}
 {{end}}    PRIMARY KEY (source, tx_hash, log_index)
 );{{end}}` + "`" + `
 
-func ApplySchema(ctx context.Context, db *sql.DB) error {
+var SchemaVersions = map[string]string{
+{{- range . }}
+	"{{.TableName}}": "{{.Signature}}",
+{{- end }}
+}
+
+func ApplySchema(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	if SchemaDDL == "" {
 		return nil
 	}
-	_, err := db.ExecContext(ctx, SchemaDDL)
-	return err
+	if _, err := db.ExecContext(ctx, SchemaDDL); err != nil {
+		return err
+	}
+	orphans, err := store.EnsureSchemaSignatures(ctx, db, SchemaVersions)
+	if err != nil {
+		return err
+	}
+	for _, t := range orphans {
+		logger.Warn("typed table has a stamped signature but is not in the generated set; leaving in place", "table", t)
+	}
+	return nil
 }
 `
 
