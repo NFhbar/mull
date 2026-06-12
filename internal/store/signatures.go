@@ -26,13 +26,21 @@ import (
 // as orphans for the caller to warn about — never deleted; regeneration must
 // not destroy user data.
 //
+// createGenSchemaVersionsDDL and upsertGenSchemaVersionSQL are shared with
+// the rebuild engine (rebuild.go) so the meta table's shape and stamping
+// semantics can't diverge between the two sites.
+const createGenSchemaVersionsDDL = `CREATE TABLE IF NOT EXISTS gen_schema_versions (
+        table_name       TEXT PRIMARY KEY,
+        column_signature TEXT NOT NULL
+    )`
+
+const upsertGenSchemaVersionSQL = `INSERT INTO gen_schema_versions (table_name, column_signature) VALUES (?, ?)
+        ON CONFLICT(table_name) DO UPDATE SET column_signature = excluded.column_signature`
+
 // Like MigrateV1ToV2 this is a package-level helper on *sql.DB rather than a
 // Store method: the caller (generated ApplySchema) already holds the handle.
 func EnsureSchemaSignatures(ctx context.Context, db *sql.DB, sigs map[string]string) ([]string, error) {
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS gen_schema_versions (
-        table_name       TEXT PRIMARY KEY,
-        column_signature TEXT NOT NULL
-    )`); err != nil {
+	if _, err := db.ExecContext(ctx, createGenSchemaVersionsDDL); err != nil {
 		return nil, fmt.Errorf("create gen_schema_versions: %w", err)
 	}
 
@@ -49,10 +57,9 @@ func EnsureSchemaSignatures(ctx context.Context, db *sql.DB, sigs map[string]str
 		}
 		expected := sigs[table]
 		if actual != expected {
-			return nil, fmt.Errorf(`codegen: %s on disk has columns [%s], regenerated codegen expects [%s]; drop or migrate the table before resuming (see README "Codegen Caveats" § Schema regeneration)`, table, actual, expected)
+			return nil, fmt.Errorf("codegen: %s on disk has columns [%s], regenerated codegen expects [%s]; run `mull migrate` to rebuild it from the raw events table, or drop it manually (see README \"Codegen Caveats\" § Schema regeneration)", table, actual, expected)
 		}
-		if _, err := db.ExecContext(ctx, `INSERT INTO gen_schema_versions (table_name, column_signature) VALUES (?, ?)
-        ON CONFLICT(table_name) DO UPDATE SET column_signature = excluded.column_signature`, table, expected); err != nil {
+		if _, err := db.ExecContext(ctx, upsertGenSchemaVersionSQL, table, expected); err != nil {
 			return nil, fmt.Errorf("stamp %s: %w", table, err)
 		}
 	}

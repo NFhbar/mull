@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 )
 
@@ -71,6 +72,13 @@ type QueryFilter struct {
 	ToBlock   *uint64
 	Limit     int
 	After     *EventCursor
+}
+
+// Execer is the narrow write surface generated sinks need. Satisfied by
+// both *sql.DB and *sql.Tx, so a sink can write through the live handle
+// during indexing or through a rebuild transaction during `mull migrate`.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // EventSink is a typed-event consumer wired in by generated code.

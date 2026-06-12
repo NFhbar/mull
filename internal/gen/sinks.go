@@ -2,12 +2,10 @@
 package gen
 
 import (
-	"database/sql"
-
 	"github.com/NFhbar/mull/internal/store"
 )
 
-func NewSinks(db *sql.DB) []store.EventSink {
+func NewSinks(db store.Execer) []store.EventSink {
 	_ = db
 	return nil
 }

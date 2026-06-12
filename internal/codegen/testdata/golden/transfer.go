@@ -3,7 +3,6 @@ package gen
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"math/big"
 
@@ -64,10 +63,10 @@ func DecodeTransfer(log store.Event) (Transfer, error) {
 }
 
 type transferSink struct {
-	db *sql.DB
+	db store.Execer
 }
 
-func newTransferSink(db *sql.DB) *transferSink {
+func newTransferSink(db store.Execer) *transferSink {
 	return &transferSink{db: db}
 }
 

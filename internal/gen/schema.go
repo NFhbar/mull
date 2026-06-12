@@ -13,6 +13,8 @@ const SchemaDDL = ""
 
 var SchemaVersions = map[string]string{}
 
+var SchemaTopics = map[string]string{}
+
 func ApplySchema(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	if SchemaDDL == "" {
 		return nil
@@ -28,4 +30,13 @@ func ApplySchema(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 		logger.Warn("typed table has a stamped signature but is not in the generated set; leaving in place", "table", t)
 	}
 	return nil
+}
+
+func RebuildDrifted(ctx context.Context, st *store.SQLite) ([]string, error) {
+	return st.RebuildDriftedTables(ctx, store.RebuildSpec{
+		DDL:        SchemaDDL,
+		Signatures: SchemaVersions,
+		Topics:     SchemaTopics,
+		NewSinks:   NewSinks,
+	})
 }

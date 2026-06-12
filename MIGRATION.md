@@ -190,6 +190,24 @@ operational cost. The alternative — leaving the v1-shaped typed tables in
 place — would mean the source column is absent from typed reads and
 cross-chain queries from typed tables would be ambiguous.
 
+### Drifted typed-table rebuild
+
+`mull migrate` also detects and rebuilds generated typed tables whose
+on-disk column shape no longer matches the committed codegen output
+(stamped in `gen_schema_versions`), including tables that were dropped by
+hand under the manual remedy above. Per drifted table, inside a single
+transaction: `DROP TABLE`, recreate from the fresh generated DDL, restamp
+the signature, then replay every matching row from the raw `events` table
+through the generated sink in `(block_number, log_index, source)` order.
+Generated sinks use `INSERT OR IGNORE` and decoders are pure functions of
+the input log, so the rebuild reproduces exactly what live indexing would
+have written — history included. A failure mid-rebuild rolls back to the
+prior on-disk state. Tables stamped in `gen_schema_versions` but absent
+from the generated set (orphans) are never touched.
+
+The rebuild only runs through `mull migrate` — `mull index` still fails
+loudly on drift and never drops data on its own.
+
 ## Store interface changes (for Go consumers)
 
 `store.Store` adds a `source string` parameter to every method that

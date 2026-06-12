@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/NFhbar/mull/internal/config"
+	"github.com/NFhbar/mull/internal/gen"
 	"github.com/NFhbar/mull/internal/store"
 
 	_ "modernc.org/sqlite"
@@ -26,6 +28,12 @@ source = "default" — matching the legacy-config shim that wraps a
 single-source mull.yaml as a synthetic "default" source.
 
 Idempotent: running on a database already at v2 is a no-op.
+
+After the v1→v2 step, any generated typed-event table whose on-disk shape
+drifted from the committed codegen output (or that was dropped by hand) is
+rebuilt: dropped, recreated from the fresh DDL, restamped in
+gen_schema_versions, and repopulated by replaying matching rows from the
+raw events table — one transaction per table.
 
 After running, mull index and mull serve will accept the database.`,
 	SilenceUsage: true,
@@ -72,7 +80,28 @@ func runMigrate(ctx context.Context) error {
 	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "migrated %s → schema v%d\n", cfg.DBPath, version)
+	// Close the raw handle before reopening through the gate — the DB is v2
+	// by now, so OpenSQLite passes and the rebuild inherits WAL + the
+	// busy_timeout DSN pragma on every pooled connection.
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close db: %w", err)
+	}
+	st, err := store.OpenSQLite(ctx, cfg.DBPath)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+	rebuilt, err := gen.RebuildDrifted(ctx, st)
+	if err != nil {
+		return fmt.Errorf("rebuild drifted tables: %w", err)
+	}
+
+	if len(rebuilt) > 0 {
+		fmt.Fprintf(os.Stdout, "migrated %s → schema v%d; rebuilt %d drifted typed table(s): %s\n",
+			cfg.DBPath, version, len(rebuilt), strings.Join(rebuilt, ", "))
+	} else {
+		fmt.Fprintf(os.Stdout, "migrated %s → schema v%d\n", cfg.DBPath, version)
+	}
 	return nil
 }
 

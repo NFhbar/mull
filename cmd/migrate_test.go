@@ -104,6 +104,36 @@ func TestMigrateCommandUpgradesV1DB(t *testing.T) {
 	}
 }
 
+func TestMigrateCommandIdempotentOnV2(t *testing.T) {
+	cfgPath := writeV1DBAndConfig(t)
+
+	prev := cfgFile
+	t.Cleanup(func() { cfgFile = prev })
+	cfgFile = cfgPath
+
+	if err := runMigrate(context.Background()); err != nil {
+		t.Fatalf("first runMigrate: %v", err)
+	}
+	// Second run: v1→v2 is a no-op and the drifted-table rebuild (empty
+	// generated set in the committed stub) finds nothing to do.
+	if err := runMigrate(context.Background()); err != nil {
+		t.Fatalf("second runMigrate: %v", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPathFromCfg(t, cfgPath))
+	if err != nil {
+		t.Fatalf("open migrated: %v", err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	if version != store.SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, store.SchemaVersion)
+	}
+}
+
 // dbPathFromCfg parses the temp config to discover the dbpath. The test wrote
 // it; we re-read it here to avoid coupling the test to writeV1DBAndConfig's
 // path layout.

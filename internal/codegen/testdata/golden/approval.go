@@ -3,7 +3,6 @@ package gen
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"math/big"
 
@@ -64,10 +63,10 @@ func DecodeApproval(log store.Event) (Approval, error) {
 }
 
 type approvalSink struct {
-	db *sql.DB
+	db store.Execer
 }
 
-func newApprovalSink(db *sql.DB) *approvalSink {
+func newApprovalSink(db store.Execer) *approvalSink {
 	return &approvalSink{db: db}
 }
 
